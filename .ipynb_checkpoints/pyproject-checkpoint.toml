@@ -1,0 +1,22 @@
+[build-system]
+requires = ["uv_build >= 0.9.18, <0.10.0"]
+build-backend = "uv_build"
+
+[project]
+name = "pita-z"
+version = "0.0.1"
+authors = [
+  { name="Ashod Khederlarian", email="ashod.kh12@gmail.com" },
+]
+description = "This package is the implementation of PITA, which is a semi-supervised image-based photo-z algorithm"
+readme = "README.md"
+requires-python = ">=3.9"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.urls]
+Homepage = "https://github.com/ashodkh/PITA"
