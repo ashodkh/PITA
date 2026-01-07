@@ -1,6 +1,6 @@
 import pytorch_lightning as pl
 import torch
-from lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
+from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
 
 class CNNPhotoz(pl.LightningModule):
     """

@@ -1,6 +1,6 @@
 import pytorch_lightning as pl
 import torch
-from lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
+from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
 
 class CNNPhotoz(pl.LightningModule):
     """
@@ -12,7 +12,7 @@ class CNNPhotoz(pl.LightningModule):
         redshift_mlp (nn.Module): The final MLP for redshift prediction.
         lr (float): Learning rate for the optimizer.
         transforms (callable): Optional image augmentations. 
-        lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, wc_ann. 
+        lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
     """
     
     def __init__(

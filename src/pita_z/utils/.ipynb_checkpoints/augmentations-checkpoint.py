@@ -12,8 +12,8 @@ class JitterCrop:
         center_x = image.shape[2]//2
         center_y = image.shape[2]//2
         if self.jitter_lim:
-            center_x = center_x + int(np.random.randint(-self.jitter_lim, self.jitter_lim+1, 1))
-            center_y = center_y + int(np.random.randint(-self.jitter_lim, self.jitter_lim+1, 1))
+            center_x = center_x + np.random.randint(-self.jitter_lim, self.jitter_lim+1, 1)[0]
+            center_y = center_y + np.random.randint(-self.jitter_lim, self.jitter_lim+1, 1)[0]
         
         return image[:,:, center_y-self.half_dim:center_y+self.half_dim,
                      center_x-self.half_dim:center_x+self.half_dim]

@@ -10,7 +10,7 @@ class ReddeningTransform:
     def __call__(self, data):
         image, ebv = data
         # assumed that image shape is C,pixels,pixels
-        assert self.R.shape == image.shape[0]
+        assert self.R.shape[0] == image.shape[0]
         # Detect input type
         is_torch = isinstance(image, torch.Tensor)
         if is_torch:

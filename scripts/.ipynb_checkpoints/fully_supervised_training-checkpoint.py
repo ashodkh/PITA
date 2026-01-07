@@ -9,11 +9,17 @@ import yaml
 import argparse
 
 # import custom modules
-import fully_supervised_model as fully_supervised_model
-import basic_models as basic_models
-import candels_data_modules as dm
-import reddening as reddening
-import augmentations as augs
+from pita_z.models import fully_supervised_model
+from pita_z.models import basic_models
+from pita_z.data_modules import data_modules
+from pita_z.utils import reddening
+from pita_z.utils import augmentations 
+
+# import fully_supervised_model as fully_supervised_model
+# import basic_models as basic_models
+# import candels_data_modules as dm
+# import reddening as reddening
+# import augmentations as augs
 
 parser = argparse.ArgumentParser()
 parser.add_argument('config_file', type=str)
@@ -21,7 +27,8 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-with open(f"/global/homes/a/ashodkh/image_photo_z/scripts/{config_file}.yaml", "r") as f:
+config_dir = '/global/homes/a/ashodkh/git_repos/PITA/configs/'
+with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 
 run = args.run
@@ -35,16 +42,16 @@ if __name__ == '__main__':
         transforms = v2.Compose([
             v2.RandomHorizontalFlip(0.5),
             v2.RandomRotation(180, interpolation=v2.InterpolationMode.BILINEAR),
-            augs.JitterCrop(output_dim=config['augmentations']['crop_dim'], jitter_lim=config['augmentations']['jitter_lim']),
-            augs.AddGaussianNoise(mean=0, std=band_mads)
+            augmentations.JitterCrop(output_dim=config['augmentations']['crop_dim'], jitter_lim=config['augmentations']['jitter_lim']),
+            augmentations.AddGaussianNoise(mean=0, std=band_mads)
         ])
     else:
         transforms = v2.Compose([
             v2.RandomHorizontalFlip(0.5),
             v2.RandomRotation(180, interpolation=v2.InterpolationMode.BILINEAR),
-            augs.JitterCrop(output_dim=64, jitter_lim=4),
+            augmentations.JitterCrop(output_dim=64, jitter_lim=4),
         ])
-    data_module = dm.ImagesDataModule(
+    data_module = data_modules.ImagesDataModule(
         batch_size=config['data']['batch_size'],
         num_workers=config['data']['num_workers'],
         train_size=0.8,
@@ -103,7 +110,6 @@ if __name__ == '__main__':
         save_dir=config['logging_and_checkpoint']['dir_log'],
         name=f'candels_{config_file}_run{run}'
     )
-    
 
     trainer = pl.Trainer(
         accelerator='gpu', 

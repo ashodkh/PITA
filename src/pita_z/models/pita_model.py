@@ -1,7 +1,7 @@
 import pytorch_lightning as pl
 import torch
 import torch.nn.functional as F
-from lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
+from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
 import copy
 
 class PITALightning(pl.LightningModule):
