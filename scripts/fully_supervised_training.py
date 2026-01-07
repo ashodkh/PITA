@@ -15,12 +15,6 @@ from pita_z.data_modules import data_modules
 from pita_z.utils import reddening
 from pita_z.utils import augmentations 
 
-# import fully_supervised_model as fully_supervised_model
-# import basic_models as basic_models
-# import candels_data_modules as dm
-# import reddening as reddening
-# import augmentations as augs
-
 parser = argparse.ArgumentParser()
 parser.add_argument('config_file', type=str)
 parser.add_argument('run', type=int)

@@ -10,12 +10,11 @@ import yaml
 import argparse
 
 # import custom modules
-import nn_modules_pytorch as nn_modules
-import candels_data_modules as dm
-import sdss_reddening as reddening
-import transform_utils as transform_utils
-import moco_color_redshift_loss as MoCo
-from custom_ckpt import DelayedCheckpoint
+from pita_z.models import pita_model
+from pita_z.models import basic_models
+from pita_z.data_modules import data_modules
+from pita_z.utils import reddening
+from pita_z.utils import augmentations 
 
 parser = argparse.ArgumentParser()
 parser.add_argument('config_file', type=str)
@@ -23,22 +22,22 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-with open(f"/global/homes/a/ashodkh/image_photo_z/scripts/{config_file}.yaml", "r") as f:
+config_dir = '/global/homes/a/ashodkh/git_repos/PITA/configs/'
+with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 
 run = args.run
 
 if __name__ == '__main__':
     ## prepping data
-    
     reddening_transform = reddening.ReddeningTransform(R=config['augmentations']['reddening_R'], redden_aug=False)
     if config['augmentations']['gaussian_transform']:
         band_mads = np.load(config['data']['path_band_mads'])
         transforms = v2.Compose([
             v2.RandomHorizontalFlip(0.5),
             v2.RandomRotation(180, interpolation=v2.InterpolationMode.BILINEAR),
-            transform_utils.JitterCrop(output_dim=config['augmentations']['crop_dim'], jitter_lim=config['augmentations']['jitter_lim']),
-            transform_utils.AddGaussianNoise(mean=0, std=band_mads)
+            augmentations.JitterCrop(output_dim=config['augmentations']['crop_dim'], jitter_lim=config['augmentations']['jitter_lim']),
+            augmentations.AddGaussianNoise(mean=0, std=band_mads)
         ])
     else:
         transforms = v2.Compose([
@@ -46,7 +45,7 @@ if __name__ == '__main__':
             v2.RandomRotation(180, interpolation=v2.InterpolationMode.BILINEAR),
             transform_utils.JitterCrop(output_dim=64, jitter_lim=4),
         ])
-    data_module = dm.ImagesDataModule(
+    data_module = data_modules.ImagesDataModule(
         batch_size=config['data']['batch_size'],
         num_workers=config['data']['num_workers'],
         train_size=0.8,
@@ -65,29 +64,29 @@ if __name__ == '__main__':
     projection_d = config['model']['projection_d']
 
     # encoder_type = 'my_encoder'
-    # joint_blocks = nn_modules.JointBlocks(
+    # joint_blocks = basic_models.JointBlocks(
     #                                 input_channels=32,
     #                                 block_channels=[32,64],
     #                                 avg_pooling_layers=[4,4]
     # )
-    # encoder = nn_modules.Encoder(
+    # encoder = basic_models.Encoder(
     #                             input_channels=n_filters,
     #                             first_layer_output_channels=32,
     #                             joint_blocks=joint_blocks
     # )
     
     # encoder_type = 'convnext'    
-    # encoder = nn_modules.CustomConvNeXt(n_filters)
+    # encoder = basic_models.CustomConvNeXt(n_filters)
 
     encoder = models.convnext_tiny(weights=None)
     encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 96, kernel_size=(4,4), stride=(4,4))
 
-    encoder_mlp = nn_modules.MLP(input_dim=1000, hidden_layers=[512,latent_d])
-    projection_head = nn_modules.MLP(input_dim=latent_d, hidden_layers=[128,projection_d])
-    redshift_mlp = nn_modules.MLP(input_dim=latent_d, hidden_layers=config['model']['redshift_mlp_hidden_layers'])
-    color_mlp = nn_modules.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'])    
+    encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512,latent_d])
+    projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128,projection_d])
+    redshift_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['redshift_mlp_hidden_layers'])
+    color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'])    
 
-    simclrmoco_model = MoCo.MoCoLightning(
+    simclrmoco_model = pita_model.PITALightning(
         encoder=encoder,
         encoder_mlp=encoder_mlp,
         projection_head=projection_head,
