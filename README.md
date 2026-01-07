@@ -7,7 +7,7 @@ PITA is a semi-supervised, image-based photometric redshift (photo-z) algorithm.
 In our paper, we show that PITA outperforms traditional ML and fully-supervised CNN methods on HST [CANDELS survey](https://www.ipac.caltech.edu/project/candels) galaxies out to z ~ 3. 
 
 # Running PITA
-The `scripts` folder contains an example script for training PITA.
+The `scripts` folder contains an example script `/scripts/pita_training.py` for training PITA. By default it is set to train on a single node with 4 GPUs.
 
 ## Installation
 PITA can be installed with pip:
