@@ -1,6 +1,9 @@
 import pytorch_lightning as pl
 import torch
 from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
+from calpit.utils import trapz_grid
+from scipy.interpolate import PchipInterpolator
+import numpy as np
 
 class CNNPhotoz(pl.LightningModule):
     """
@@ -190,7 +193,9 @@ class CalpitPhotometryLightning(pl.LightningModule):
         loss_type='bce',
         lr=None,
         lr_scheduler=None,
-        alpha_grid=None
+        alpha_grid=None,
+        y_grid=None,
+        cde_init_type='uniform'
     ):
         super().__init__()
         self.model = model
@@ -198,14 +203,32 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self.lr = lr
         self.lr_scheduler = lr_scheduler
         self.alpha_grid = torch.tensor(alpha_grid)
+        self.y_grid = y_grid
+        if cde_init_type == 'uniform':
+            self.cde_init = torch.tensor(1 / (y_grid[-1] - y_grid[0]) * torch.ones(len(y_grid)))
 
     def forward(self, x):
         return self.model(x)
 
-    def transform(self, x, cde_init, y_grid):
+    def transform(self, x):
         """
-        Transforms the inpu
+        Transforms the input CDEs to the calibrated CDEs.
         """
+        cde_init = np.tile(self.cde_init, (x.shape[0],1))
+        cdf_init = torch.tensor(trapz_grid(cde_init, self.y_grid), device=x.device)
+        features = torch.cat(
+            [
+                torch.ravel(cdf_init)[:,None],
+                torch.repeat_interleave(x, cdf_init.shape[1], dim=0)
+            ],
+            dim = -1
+        )
+        cdf_new = self.forward(features.float()).reshape((x.shape[0], len(self.y_grid)))
+        cdf_new_funct = PchipInterpolator(self.y_grid, cdf_new.detach().cpu(), extrapolate=True, axis=1)
+        pdf_func = cdf_new_funct.derivative(1)
+        cde_new = pdf_func(self.y_grid)
+        return torch.tensor(cde_new, device=x.device)
+        
     def loss_fn(self, predictions, truths):
         if self.loss_type == 'bce':
             loss = torch.nn.BCELoss(reduction='mean')
@@ -223,15 +246,18 @@ class CalpitPhotometryLightning(pl.LightningModule):
         loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
         self.log("training_loss", loss, on_epoch=True, sync_dist=True)
 
-        # max_idxs = torch.argmax(outputs)
-        # delta = (batch_redshift_predictions - batch_redshifts) / (1+batch_redshifts)
-        # bias = torch.mean(delta)
-        # nmad = 1.4826*torch.median(torch.abs(delta-torch.median(delta)))
-        # outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(batch_redshifts)
+        batch_cdes = self.transform(x[:,1:])
+        max_idxs = torch.argmax(batch_cdes, axis=1)
+        max_ys = torch.tensor(self.y_grid, device=true_redshifts.device)[max_idxs]
         
-        # self.log('training_bias', bias, on_epoch=True, sync_dist=True)
-        # self.log('training_nmad', nmad, on_epoch=True, sync_dist=True)
-        # self.log('training_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
+        delta = (max_ys - true_redshifts) / (1 + true_redshifts)
+        bias = torch.mean(delta)
+        nmad = 1.4826*torch.median(torch.abs(delta-torch.median(delta)))
+        outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(true_redshifts)
+        
+        self.log('training_bias', bias, on_epoch=True, sync_dist=True)
+        self.log('training_nmad', nmad, on_epoch=True, sync_dist=True)
+        self.log('training_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
         
         return loss
         
@@ -240,7 +266,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         x_device = x.device
         n_batch = x.shape[0]
         n_alphas = len(self.alpha_grid)
-        x = torch.cat(
+        features = torch.cat(
             [
                 torch.repeat_interleave(self.alpha_grid.to(x_device), n_batch)[:,None],
                 torch.tile(x, (n_alphas,1))
@@ -249,11 +275,24 @@ class CalpitPhotometryLightning(pl.LightningModule):
         )
         y = (torch.tile(y, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid.to(x_device), n_batch)).float()
 
-        outputs = self.model(x)
+        outputs = self.model(features)
 
         loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
         self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
 
+        batch_cdes = self.transform(x)
+        max_idxs = torch.argmax(batch_cdes, axis=1)
+        max_ys = torch.tensor(self.y_grid, device=true_redshifts.device)[max_idxs]
+        
+        delta = (max_ys - true_redshifts) / (1 + true_redshifts)
+        bias = torch.mean(delta)
+        nmad = 1.4826*torch.median(torch.abs(delta-torch.median(delta)))
+        outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(true_redshifts)
+        
+        self.log('val_bias', bias, on_epoch=True, sync_dist=True)
+        self.log('val_nmad', nmad, on_epoch=True, sync_dist=True)
+        self.log('val_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
+        
         return loss
         
     def configure_optimizers(self):

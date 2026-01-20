@@ -83,7 +83,9 @@ if __name__ == '__main__':
         model=model,
         lr=config['training']['learning_rate'],
         lr_scheduler=None, #config['training']['lr_scheduler']
-        alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32')
+        alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),
+        y_grid=z_grid.astype('float32'),
+        cde_init_type='uniform'
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
