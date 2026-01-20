@@ -182,3 +182,83 @@ class CNNPhotoz(pl.LightningModule):
             return optim
         else:
             return [optim], [lr_scheduler]
+
+class CalpitPhotometryLightning(pl.LightningModule):
+    def __init__(
+        self,
+        model=None,
+        loss_type='bce',
+        lr=None,
+        lr_scheduler=None,
+        alpha_grid=None
+    ):
+        super().__init__()
+        self.model = model
+        self.loss_type = loss_type
+        self.lr = lr
+        self.lr_scheduler = lr_scheduler
+        self.alpha_grid = torch.tensor(alpha_grid)
+
+    def forward(self, x):
+        return self.model(x)
+
+    def transform(self, x, cde_init, y_grid):
+        """
+        Transforms the inpu
+        """
+    def loss_fn(self, predictions, truths):
+        if self.loss_type == 'bce':
+            loss = torch.nn.BCELoss(reduction='mean')
+            return loss(predictions, truths)
+        
+    def training_step(self, batch, batch_idx):
+        x, y, true_redshifts = batch
+        n_batch = x.shape[0]
+        alphas = torch.rand(n_batch, device=x.device)
+        x = torch.hstack([alphas[:,None], x])
+        y = (y <= alphas).float()
+
+        outputs = self.model(x)
+        
+        loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
+        self.log("training_loss", loss, on_epoch=True, sync_dist=True)
+
+        # max_idxs = torch.argmax(outputs)
+        # delta = (batch_redshift_predictions - batch_redshifts) / (1+batch_redshifts)
+        # bias = torch.mean(delta)
+        # nmad = 1.4826*torch.median(torch.abs(delta-torch.median(delta)))
+        # outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(batch_redshifts)
+        
+        # self.log('training_bias', bias, on_epoch=True, sync_dist=True)
+        # self.log('training_nmad', nmad, on_epoch=True, sync_dist=True)
+        # self.log('training_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
+        
+        return loss
+        
+    def validation_step(self, batch, batch_idx):
+        x, y, true_redshifts = batch
+        x_device = x.device
+        n_batch = x.shape[0]
+        n_alphas = len(self.alpha_grid)
+        x = torch.cat(
+            [
+                torch.repeat_interleave(self.alpha_grid.to(x_device), n_batch)[:,None],
+                torch.tile(x, (n_alphas,1))
+            ],
+            dim = -1
+        )
+        y = (torch.tile(y, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid.to(x_device), n_batch)).float()
+
+        outputs = self.model(x)
+
+        loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
+        self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
+
+        return loss
+        
+    def configure_optimizers(self):
+        optim = torch.optim.Adam(self.parameters(), lr=self.lr)
+        if self.lr_scheduler is None:
+            return optim
+                
+    

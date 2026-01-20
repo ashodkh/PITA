@@ -1,7 +1,10 @@
 import pytorch_lightning as pl
 import torch
+from torch.utils.data import DataLoader
 import h5py
 import numpy as np
+from joblib import load
+from pathlib import Path
 
 class ImagesDataset(torch.utils.data.Dataset):
     def __init__(
@@ -96,17 +99,15 @@ class ImagesDataModule(pl.LightningDataModule):
             label_f=label_f
         )
      
-    def train_dataloader(self) -> torch.utils.data.DataLoader:
-        """Returns the training dataloader."""
+    def train_dataloader(self) -> DataLoader:
         return self._create_dataloader(self.images_train, shuffle=True)
 
-    def val_dataloader(self) -> torch.utils.data.DataLoader:
-        """Returns the validation dataloader."""
+    def val_dataloader(self) -> DataLoader:
         return self._create_dataloader(self.images_val, shuffle=False)
 
-    def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> torch.utils.data.DataLoader:
+    def _create_dataloader(self, dataset: torch.utils.data.Dataset, shuffle: bool) -> DataLoader:
         """Helper to create a DataLoader with consistent parameters."""
-        return torch.utils.data.DataLoader(
+        return DataLoader(
             dataset=dataset,
             batch_size=self.batch_size,
             num_workers=self.num_workers,
@@ -114,3 +115,68 @@ class ImagesDataModule(pl.LightningDataModule):
             persistent_workers=True,
             pin_memory=torch.cuda.is_available(),
         )
+
+class CalpitPhotometryDataset(torch.utils.data.Dataset):
+    def __init__(self, file_path=None, feature_name=None, pit=None, scaler_path=None):
+        if Path(file_path).suffix == '.hdf5':
+            self.file = h5py.File(file_path, 'r')
+        self.feature_name = feature_name
+        self.pit = pit
+        self.scaler = load(scaler_path) if scaler_path else None
+
+    def __len__(self):
+        key = list(self.file.keys())[0]
+        return len(self.file[key])
+
+    def __getitem__(self, idx):
+        x = self.file[self.feature_name][idx].astype(np.float32)
+        if self.scaler:
+            x = self.scaler.transform(x.reshape(1,-1))
+        #x = torch.tensor(x.squeeze())
+        #y = torch.tensor(self.pit[idx])
+        
+        return x.squeeze(), self.pit[idx], self.file['redshifts'][idx].astype(np.float32)
+    
+class CalpitPhotometryDataModule(pl.LightningDataModule):
+    def __init__(
+        self,
+        path_train: str=None,
+        feature_name: str=None,
+        pit_train=None,
+        scaler_path: str=None,
+        path_val: str=None,
+        pit_val=None,
+        batch_size: int=None,
+        num_workers: int=None
+    ):
+        super().__init__()
+        self.path_train = path_train
+        self.feature_name = feature_name
+        self.pit_train = pit_train
+        self.scaler_path = scaler_path
+        self.path_val = path_val
+        self.pit_val = pit_val
+        self.batch_size = batch_size
+        self.num_workers = num_workers
+
+    def setup(self, stage):
+        self.ds_train = CalpitPhotometryDataset(
+            file_path=self.path_train,
+            feature_name=self.feature_name,
+            pit=self.pit_train,
+            scaler_path=self.scaler_path
+        )
+
+        self.ds_val = CalpitPhotometryDataset(
+            file_path=self.path_val,
+            feature_name=self.feature_name,
+            pit=self.pit_val,
+            scaler_path=self.scaler_path
+        )
+
+    def train_dataloader(self) -> DataLoader:
+        return DataLoader(self.ds_train, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, persistent_workers=True, pin_memory=torch.cuda.is_available())
+
+    def val_dataloader(self) -> DataLoader:
+        return DataLoader(self.ds_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, persistent_workers=True, pin_memory=torch.cuda.is_available())
+        
