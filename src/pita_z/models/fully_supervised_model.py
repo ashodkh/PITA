@@ -1,7 +1,7 @@
 import pytorch_lightning as pl
 import torch
 from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
-from calpit.utils import trapz_grid
+from calpit.utils import trapz_grid_torch
 from scipy.interpolate import PchipInterpolator
 import numpy as np
 
@@ -202,10 +202,10 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self.loss_type = loss_type
         self.lr = lr
         self.lr_scheduler = lr_scheduler
-        self.alpha_grid = torch.tensor(alpha_grid)
-        self.y_grid = y_grid
+        self.register_buffer("alpha_grid", torch.as_tensor(alpha_grid, dtype=torch.float32))
+        self.register_buffer("y_grid", torch.as_tensor(y_grid, dtype=torch.float32))
         if cde_init_type == 'uniform':
-            self.cde_init = torch.tensor(1 / (y_grid[-1] - y_grid[0]) * torch.ones(len(y_grid)))
+            self.register_buffer("cde_init", torch.full((len(y_grid),), 1/(y_grid[-1]-y_grid[0]), dtype=torch.float32))
 
     def forward(self, x):
         return self.model(x)
@@ -214,8 +214,8 @@ class CalpitPhotometryLightning(pl.LightningModule):
         """
         Transforms the input CDEs to the calibrated CDEs.
         """
-        cde_init = np.tile(self.cde_init, (x.shape[0],1))
-        cdf_init = torch.tensor(trapz_grid(cde_init, self.y_grid), device=x.device)
+        cde_init = torch.tile(self.cde_init, (x.shape[0],1))
+        cdf_init = trapz_grid_torch(cde_init, self.y_grid)
         features = torch.cat(
             [
                 torch.ravel(cdf_init)[:,None],
@@ -224,9 +224,9 @@ class CalpitPhotometryLightning(pl.LightningModule):
             dim = -1
         )
         cdf_new = self.forward(features.float()).reshape((x.shape[0], len(self.y_grid)))
-        cdf_new_funct = PchipInterpolator(self.y_grid, cdf_new.detach().cpu(), extrapolate=True, axis=1)
+        cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
         pdf_func = cdf_new_funct.derivative(1)
-        cde_new = pdf_func(self.y_grid)
+        cde_new = pdf_func(self.y_grid.detach().cpu())
         return torch.tensor(cde_new, device=x.device)
         
     def loss_fn(self, predictions, truths):
@@ -248,7 +248,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
 
         batch_cdes = self.transform(x[:,1:])
         max_idxs = torch.argmax(batch_cdes, axis=1)
-        max_ys = torch.tensor(self.y_grid, device=true_redshifts.device)[max_idxs]
+        max_ys = self.y_grid[max_idxs]
         
         delta = (max_ys - true_redshifts) / (1 + true_redshifts)
         bias = torch.mean(delta)
@@ -268,12 +268,12 @@ class CalpitPhotometryLightning(pl.LightningModule):
         n_alphas = len(self.alpha_grid)
         features = torch.cat(
             [
-                torch.repeat_interleave(self.alpha_grid.to(x_device), n_batch)[:,None],
+                torch.repeat_interleave(self.alpha_grid, n_batch)[:,None],
                 torch.tile(x, (n_alphas,1))
             ],
             dim = -1
         )
-        y = (torch.tile(y, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid.to(x_device), n_batch)).float()
+        y = (torch.tile(y, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid, n_batch)).float()
 
         outputs = self.model(features)
 
@@ -282,7 +282,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
 
         batch_cdes = self.transform(x)
         max_idxs = torch.argmax(batch_cdes, axis=1)
-        max_ys = torch.tensor(self.y_grid, device=true_redshifts.device)[max_idxs]
+        max_ys = self.y_grid[max_idxs]
         
         delta = (max_ys - true_redshifts) / (1 + true_redshifts)
         bias = torch.mean(delta)

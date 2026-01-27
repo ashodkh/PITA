@@ -109,7 +109,7 @@ if __name__ == '__main__':
 
     trainer = pl.Trainer(
         accelerator='gpu', 
-        devices=4,
+        devices=1,
         min_epochs=1,
         max_epochs=config['training']['epochs'],
         precision='32',
