@@ -322,6 +322,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
         loss_type='bce',
         alpha_grid=None,
         y_grid=None,
+        cde_init_type='uniform',
         transforms=None,
         transforms_val=None,
         lr=None,
@@ -391,7 +392,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
                 dim=-1
             )
             x = self.redshift_mlp(x)
-            return x.squeeze(), _
+            return x.squeeze(), None
 
     def transform_cde(self, x):
         """
@@ -461,9 +462,9 @@ class CalpitCNNPhotoz(pl.LightningModule):
         batch_predictions, _ = self.forward(batch_images, goal='validate')
         n_batch = batch_images.shape[0]
         n_alphas = len(self.alpha_grid)
-        y = (torch.tile(y, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid, n_batch)).float()
+        y = (torch.tile(batch_pits, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid, n_batch)).float()
         
-        loss = self.huber_loss(batch_predictions, torch.squeeze(y))
+        loss = self.loss_fn(batch_predictions, torch.squeeze(y))
         self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
 
         # Compute metrics (bias, NMAD, and outlier fraction) and log them

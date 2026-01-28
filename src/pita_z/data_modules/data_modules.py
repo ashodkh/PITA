@@ -204,14 +204,14 @@ class CalpitImagesDataset(torch.utils.data.Dataset):
         self.label_f = label_f
 
     def __len__(self) -> int:
-        return len(self.h5_file['images'])
+        return len(self.file['images'])
     
     def __getitem__(self, idx: int):
-        image = self.h5_file['images'][idx]
-        ebv = self.h5_file['ebvs'][idx] if self.load_ebv else None
-        redshift = self.h5_file['redshifts'][idx] if self.with_redshift else None
-        color_features = self.h5_file['dered_color_features'][idx] if self.with_features else 1
-        redshift_weight = self.h5_file[f'use_redshift_{self.label_f}'][idx] if self.with_weights else 1
+        image = self.file['images'][idx]
+        ebv = self.file['ebvs'][idx] if self.load_ebv else None
+        redshift = self.file['redshifts'][idx] if self.with_redshift else None
+        color_features = self.file['dered_color_features'][idx] if self.with_features else 1
+        redshift_weight = self.file[f'use_redshift_{self.label_f}'][idx] if self.with_weights else 1
 
         # Apply reddening transformation if provided
         if self.reddening_transform:
