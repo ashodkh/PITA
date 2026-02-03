@@ -309,8 +309,13 @@ class CalpitCNNPhotoz(pl.LightningModule):
         encoder (nn.Module): A CNN encoder.
         encoder_mlp (nn.Module, optional): An optional MLP that projects encoder outputs to a lower dimension.
         redshift_mlp (nn.Module): The final MLP for redshift prediction.
+        loss_type (string): Calpit loss type. Default is binary cross-entropy.
+        alpha_grid (np.ndarray or torch.tensor): Fixed grid of alpha's to calculate validation loss.
+        y_grid (np.ndarray or torch.tensor): Grid of y-values on which pdfs are calculated.
+        cde_init_type (string): Initial cde guess. Defaults to uniform.
+        transforms (callable): Optional image augmentations.
+        transforms_val (callable): Optional image augmentations for the validation set.
         lr (float): Learning rate for the optimizer.
-        transforms (callable): Optional image augmentations. 
         lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
     """
     
@@ -394,6 +399,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
             x = self.redshift_mlp(x)
             return x.squeeze(), None
 
+    @torch.no_grad()
     def transform_cde(self, x):
         """
         Transforms the input CDEs to the calibrated CDEs.
