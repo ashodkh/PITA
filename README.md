@@ -16,11 +16,44 @@ pip install pita-z
 ```
 Alternatively, you can clone the repo and run `pip install .` in the repo directory.
 
+## Loading the pre-trained model
+The trained model is on Huggingface [https://huggingface.co/Ashodkh/PITA_pretrained](https://huggingface.co/Ashodkh/PITA_pretrained). The easiest way to access it is to download the model checkpoint file "pita_pretrained_model_checkpoint.ckpt" and to use PyTorch Lightning's `load_from_checkpoint()` function, along with the default PITA hyperparameters (which can be found in the config file in `/configs/pita_default.yaml`:
+
+```
+import torchvision.models as models
+from pita_z.models import basic_models
+from pita_z.models import pita_model
+
+
+encoder = models.convnext_tiny(weights=None)
+encoder._modules["features"][0][0] = nn.Conv2d(4, 96, kernel_size=(4,4), stride=(4,4)) # By default convnext takes as input 3 channels. This changes it to 4.
+
+latent_d = 128
+projection_d = 64
+
+encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512,latent_d])
+projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128,64])
+redshift_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=[256,128,128,128,128,64,1])
+color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=[256,128,128,128,128,64,4])
+
+model = pita_model.PITALightning.load_from_checkpoint(
+    checkpoint_path='where you stored the .ckpt file',
+    encoder=encoder,
+    encoder_mlp=encoder_mlp,
+    projection_head=projection_head,
+    redshift_mlp=redshift_mlp,
+    color_mlp=color_mlp,
+    transforms=None,
+    queue_size=60000,
+    temperature=0.1
+)
+```
+
 ## Config files
 All the hyperparameters and relevant file paths are contained in the `/configs/pita_default.yaml` file. To train PITA on your own dataset, the directories within the config file should be changed accordingly.
 
-## Dataset
-To use the default Pytorch Lightning data module in `src/pita_z/data_modules/data_modules.py`, your data should be stored in an hdf5 file. Along with images, photometric colors, and redshifts, the code relies on an additional redshift weight array `use_redshift` that should be 1 when the image has a redshift label, and 0 otherwise.
+## Data Modules
+To use the default Pytorch Lightning data module in `src/pita_z/data_modules/data_modules.py`, your data should be stored in an hdf5 file, and the keys should correspond to what is expected in `data_modules.py`. Along with images, photometric colors, and redshifts, the code relies on an additional redshift weight array `use_redshift` that should be 1 when the image has a redshift label, and 0 otherwise.
 
 If your data is stored in another format, you can define your own dataset class and lightning data module. Additional information on lightning data modules can be found at [this link](https://lightning.ai/docs/pytorch/stable/data/datamodule.html).
 
