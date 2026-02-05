@@ -23,7 +23,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/calpit/configs/'
+config_dir = '/global/homes/a/ashodkh/calpit/rubin_dp1/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -80,7 +80,7 @@ if __name__ == '__main__':
         transforms = v2.Compose([
             v2.RandomHorizontalFlip(0.5),
             v2.RandomRotation(180, interpolation=v2.InterpolationMode.BILINEAR),
-            augmentations.JitterCrop(output_dim=64, jitter_lim=4),
+            augmentations.JitterCrop(output_dim=config['augmentations']['crop_dim'], jitter_lim=config['augmentations']['jitter_lim']),
         ])
         
     data_module = data_modules.CalpitImagesDataModule(
@@ -104,7 +104,7 @@ if __name__ == '__main__':
     
     encoder = models.convnext_tiny(weights=None)
     encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 96, kernel_size=(4,4), stride=(4,4))
-    encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512,latent_d])
+    encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
     redshift_mlp = calpit.nn.models.MLP(
             latent_d+1, # 4 photometric fluxes + 1 alpha
             config['model']['redshift_mlp_hidden_layers']
@@ -153,7 +153,7 @@ if __name__ == '__main__':
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/calpit/scripts",
+        default_root_dir="/global/homes/a/ashodkh/calpit/rubin_dp1/scripts",
         strategy='ddp',
         logger=tb_logger,
         enable_progress_bar=False,

@@ -17,7 +17,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/calpit/configs/'
+config_dir = '/global/homes/a/ashodkh/calpit/rubin_dp1/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -65,7 +65,7 @@ if __name__ == '__main__':
         path_train=path_train,
         feature_name=config['data']['feature_name'],
         pit_train=pit_train,
-        scaler_path=config['data']['scaler_path'],
+        scaler_path=None,
         path_val=path_val,
         pit_val=pit_val,
         batch_size=config['data']['batch_size'],
@@ -75,7 +75,7 @@ if __name__ == '__main__':
     ## prepping model
     if config['model']['type'] == 'MLP':
         model = calpit.nn.models.MLP(
-            5, # 4 photometric fluxes + 1 alpha
+            7, # 4 photometric fluxes + 1 alpha
             config['model']['hidden_layers']
         )
 
@@ -114,7 +114,7 @@ if __name__ == '__main__':
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/calpit/scripts",
+        default_root_dir="/global/homes/a/ashodkh/calpit/rubin_dp1/scripts",
         strategy='ddp',
         logger=tb_logger,
         enable_progress_bar=False,

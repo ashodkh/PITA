@@ -80,7 +80,7 @@ if __name__ == '__main__':
         transforms = v2.Compose([
             v2.RandomHorizontalFlip(0.5),
             v2.RandomRotation(180, interpolation=v2.InterpolationMode.BILINEAR),
-            augmentations.JitterCrop(output_dim=64, jitter_lim=4),
+            augmentations.JitterCrop(output_dim=config['augmentations']['crop_dim'], jitter_lim=config['augmentations']['jitter_lim']),
         ])
         
     data_module = data_modules.CalpitImagesDataModule(
