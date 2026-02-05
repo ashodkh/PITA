@@ -96,7 +96,7 @@ class PITALightning(pl.LightningModule):
             param.requires_grad = False
         
         # Initialize the queue for negative samples
-        self.register_buffer("queue", torch.randn(queue_size, projection_head.out_features))
+        self.register_buffer("queue", torch.randn(queue_size, projection_head.output_dim))
         self.queue = F.normalize(self.queue, dim=1) 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
     
@@ -440,7 +440,7 @@ class CalPITALightning(pl.LightningModule):
             param.requires_grad = False
         
         # Initialize the queue for negative samples
-        self.register_buffer("queue", torch.randn(queue_size, projection_head.out_features))
+        self.register_buffer("queue", torch.randn(queue_size, projection_head.output_dim))
         self.queue = F.normalize(self.queue, dim=1) 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
     

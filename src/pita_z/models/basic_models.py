@@ -10,18 +10,22 @@ class MLP(nn.Module):
     Args:
         - input_dim (int): The input dimension to the first fully connected layer (default: 512).
         - hidden_layers (list of int): List specifying the number of units in each hidden layer.
+        - output_dim (int): Output dimensions.
         
     """
-    def __init__(self, input_dim: int=512, hidden_layers: list=[512,512,128]):
+    def __init__(self, input_dim: int=512, hidden_layers: list=[512,512,128], output_dim=1):
         super().__init__()
-        self.out_features = hidden_layers[-1]
+        self.output_dim = output_dim
         self.projection_layers = nn.ModuleList()
         
         self.projection_layers.append(nn.Linear(input_dim, hidden_layers[0]))
+        self.projection_layers.append(nn.ReLU(inplace=True))
         
         for i in range(1,len(hidden_layers)):
-            self.projection_layers.append(nn.ReLU(inplace=True))
             self.projection_layers.append(nn.Linear(hidden_layers[i-1], hidden_layers[i]))
+            self.projection_layers.append(nn.ReLU(inplace=True))
+
+        self.projection_layers.append(nn.Linear(hidden_layers[-1], output_dim))
         
     def forward(self, x):
         """
