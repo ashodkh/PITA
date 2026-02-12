@@ -139,12 +139,12 @@ if __name__ == '__main__':
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
     
     checkpoint_callback = ModelCheckpoint(
-        monitor='epoch',
-        mode='max',
+        #monitor='epoch',
+        #mode='max',
         dirpath=config['logging_and_checkpoint']['dir_checkpoint'],
         filename=checkpoint_filename,
         every_n_epochs=config['logging_and_checkpoint']['every_n_epochs'],
-        save_top_k=20,
+        save_top_k=-1,
         enable_version_counter=False
     )
     

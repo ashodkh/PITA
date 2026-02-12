@@ -196,6 +196,7 @@ class PITALightning(pl.LightningModule):
         # only use available redshifts
         good_redshifts_mask = redshift_weights == 1
         if good_redshifts_mask.sum() == 0:
+            redshift_loss = 0 * self.redshift_loss_fn(w_alphas[:1], torch.squeeze(y)[:1])
             redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
         else:
             predicted_redshifts = predicted_redshifts[good_redshifts_mask]
@@ -619,6 +620,8 @@ class CalPITALightning(pl.LightningModule):
             y = (batch_pits <= alphas).float()
             good_redshifts_mask = batch_redshift_weights == 1
             if good_redshifts_mask.sum() == 0:
+                dummy_loss = 0 * self.redshift_loss_fn(w_alphas[:1], torch.squeeze(y)[:1])
+                total_loss += dummy_loss
                 redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
             else:
                 redshift_loss = self.redshift_loss_fn(w_alphas[good_redshifts_mask], torch.squeeze(y)[good_redshifts_mask])
@@ -672,6 +675,8 @@ class CalPITALightning(pl.LightningModule):
             good_redshifts_mask = batch_redshift_weights == 1
             good_redshifts_mask_tiled = torch.tile(good_redshifts_mask, (n_alphas,))
             if good_redshifts_mask.sum() == 0:
+                dummy_loss = 0 * self.redshift_loss_fn(w_alphas[:1], torch.squeeze(y)[:1])
+                total_loss += dummy_loss
                 redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
             else:
                 redshift_loss = self.redshift_loss_fn(w_alphas[good_redshifts_mask_tiled], torch.squeeze(y)[good_redshifts_mask_tiled])
