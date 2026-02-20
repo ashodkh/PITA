@@ -1,10 +1,10 @@
-This repo contains the Pytorch Lightning implementation of PITA (Photo-z Inference with a Triple-loss Algorithm).
+This repo contains the Pytorch Lightning implementation of PITA (Photo-z Inference with a Triple-loss Algorithm). https://www.arxiv.org/abs/2602.10207.
 
 PITA is a semi-supervised, image-based photometric redshift (photo-z) algorithm. It combines contrastive learning with color and redshift prediction losses, enabling simultaneous training with both unlabeled and labeled data.
 
 <img width="1466" height="818" alt="semi_supervised_arch_new" src="https://github.com/user-attachments/assets/0aa5d73d-58e1-469b-83c5-9961d9320fcc" />
 
-In our paper, we show that PITA outperforms traditional ML and fully-supervised CNN methods on HST [CANDELS survey](https://www.ipac.caltech.edu/project/candels) galaxies out to z ~ 3. 
+In our paper (https://www.arxiv.org/abs/2602.10207), we show that PITA outperforms traditional ML and fully-supervised CNN methods on HST [CANDELS survey](https://www.ipac.caltech.edu/project/candels) galaxies out to z ~ 3. 
 
 # Running PITA
 The `scripts` folder contains an example script `/scripts/pita_training.py` for training PITA. By default it is set to train on a single node with 4 GPUs.
