@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 from torchvision import models
-
+import monotonicnetworks as lmn
 
 class MLP(nn.Module):
     """
@@ -43,6 +43,62 @@ class MLP(nn.Module):
             
         return x  
 
+class LipschitzMLP(nn.Module):
+    '''
+    A multi-layer perceptron (MLP) with customizable hidden layers that is Lipschitz bounded with p=1.
+    Args:
+        - input_dim (int): The input dimension to the first fully connected layer (default: 512).
+        - hidden_layers (list of int): List specifying the number of units in each hidden layer.
+        - output_dim (int): Output dimensions.
+
+    '''
+    def __init__(self, input_dim: int=512, hidden_layers: list=[512,512,128], output_dim=1):
+        super().__init__()
+        self.output_dim = output_dim
+        self.nn_layers = nn.ModuleList()
+        
+        self.nn_layers.append(lmn.LipschitzLinear(input_dim, hidden_layers[0], kind="one-inf"))
+        self.nn_layers.append(lmn.GroupSort(2))
+        
+        for i in range(1,len(hidden_layers)):
+            self.nn_layers.append(lmn.LipschitzLinear(hidden_layers[i-1], hidden_layers[i], kind="inf"))
+            self.nn_layers.append(lmn.GroupSort(2))
+
+
+        self.nn_layers.append(lmn.LipschitzLinear(hidden_layers[-1], output_dim, kind="inf"))
+        
+    def forward(self, x):
+        """
+        Forward pass of the MLP module.
+        
+        Args:
+            - x (Pytorch Tensor): Input tensor.
+        
+        Returns:
+            - Output tensor after passing through the MLP layers.
+            
+        """
+        for layer in self.nn_layers:
+            x = layer(x)
+            
+        return x  
+
+class MonotonicMLP(nn.Module):
+    '''
+    Combines LipschitzMLP with monotonic wrapper and adds sigmoig at the end.
+
+    '''
+    def __init__(self, lipschitz_mlp, monotonic_constraints, lipschitz_const):
+        super().__init__()
+        self.mono = lmn.MonotonicWrapper(
+            lipschitz_mlp,
+            monotonic_constraints=monotonic_constraints,
+            lipschitz_const=lipschitz_const
+        )
+        
+    def forward(self, x):
+        return torch.sigmoid(0.3 * self.mono(x))    
+    
 class ConvBlock(nn.Module):
     """
     A custom convolutional block with Pytorch that consists of two convolution layers.

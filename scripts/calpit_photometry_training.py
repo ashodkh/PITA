@@ -6,10 +6,12 @@ import yaml
 import argparse
 import calpit
 import h5py
+import monotonicnetworks as lmn
 
 # import custom modules
 from pita_z.data_modules import data_modules
 from pita_z.models import fully_supervised_model
+from pita_z.models import basic_models
 
 parser = argparse.ArgumentParser()
 parser.add_argument('config_file', type=str)
@@ -17,7 +19,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/calpit/rubin_dp1/configs/'
+config_dir = '/global/homes/a/ashodkh/calpit/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -75,9 +77,20 @@ if __name__ == '__main__':
     ## prepping model
     if config['model']['type'] == 'MLP':
         model = calpit.nn.models.MLP(
-            7, # 4 photometric fluxes + 1 alpha
+            5, # 4 photometric fluxes + 1 alpha
             config['model']['hidden_layers']
         )
+    elif config['model']['type'] == 'MonotonicMLP':
+        lipschitz_mlp = basic_models.LipschitzMLP(
+            5, # 4 photometric fluxes + 1 alpha
+            config['model']['hidden_layers']
+        )
+        model = basic_models.MonotonicMLP(
+            lipschitz_mlp,
+            monotonic_constraints=[1,0,0,0,0],
+            lipschitz_const=config['model']['lipschitz_const'],
+        )
+        
 
     pl_model = fully_supervised_model.CalpitPhotometryLightning(
         model=model,
@@ -109,12 +122,12 @@ if __name__ == '__main__':
 
     trainer = pl.Trainer(
         accelerator='gpu', 
-        devices=1,
+        devices=4,
         min_epochs=1,
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/calpit/rubin_dp1/scripts",
+        default_root_dir="/global/homes/a/ashodkh/calpit/scripts",
         strategy='ddp',
         logger=tb_logger,
         enable_progress_bar=False,

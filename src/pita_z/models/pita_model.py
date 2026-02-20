@@ -5,6 +5,7 @@ from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCos
 import copy
 from calpit.utils import trapz_grid_torch
 from scipy.interpolate import PchipInterpolator
+from sklearn.isotonic import IsotonicRegression
 import numpy as np
 
 class PITALightning(pl.LightningModule):
@@ -539,10 +540,16 @@ class CalPITALightning(pl.LightningModule):
             ],
             dim = -1
         )
-        cdf_new = self.redshift_mlp(features.float()).reshape((x.shape[0], len(self.y_grid)))
-        cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
-        pdf_func = cdf_new_funct.derivative(1)
-        cde_new = pdf_func(self.y_grid.detach().cpu())
+        cdf_new = self.redshift_mlp(features.float()).reshape((x.shape[0], len(self.y_grid))).detach().cpu()
+        
+        #cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
+        #pdf_func = cdf_new_funct.derivative(1)
+        #cde_new = pdf_func(self.y_grid.detach().cpu())
+
+        cdf_regressor = IsotonicRegression()
+        cdf_new_mono = np.stack([cdf_regressor.fit_transform(self.y_grid.detach().cpu(), cdf) for cdf in cdf_new])
+        cde_new = np.gradient(cdf_new_mono, self.y_grid.detach().cpu(), axis=1)
+        
         return torch.tensor(cde_new, device=x.device)
     
     def redshift_loss_fn(self, predictions, truths):
