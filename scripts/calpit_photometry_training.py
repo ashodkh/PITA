@@ -90,26 +90,37 @@ if __name__ == '__main__':
             monotonic_constraints=[1,0,0,0,0],
             lipschitz_const=config['model']['lipschitz_const'],
         )
+    elif config['model']['type'] == 'UMNN':
+        model = calpit.nn.umnn.MonotonicNN(
+            5,
+            config['model']['hidden_layers'],
+            sigmoid=True
+        )
         
 
+    lr_scheduler_config = config['training']['lr_scheduler']
+    scheduler_type = lr_scheduler_config['type']
+    scheduler_params = lr_scheduler_config[scheduler_type]
+    
     pl_model = fully_supervised_model.CalpitPhotometryLightning(
         model=model,
-        lr=config['training']['learning_rate'],
-        lr_scheduler=None, #config['training']['lr_scheduler']
         alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),
         y_grid=z_grid.astype('float32'),
-        cde_init_type='uniform'
+        cde_init_type='uniform',
+        lr=config['training']['learning_rate'],
+        lr_scheduler=scheduler_type,
+        **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
     
     checkpoint_callback = ModelCheckpoint(
-        monitor='epoch',
-        mode='max',
+        #monitor='epoch',
+        #mode='max',
         dirpath=config['logging_and_checkpoint']['dir_checkpoint'],
         filename=checkpoint_filename,
         every_n_epochs=config['logging_and_checkpoint']['every_n_epochs'],
-        save_top_k=20,
+        save_top_k=-1,
         enable_version_counter=False
     )
     

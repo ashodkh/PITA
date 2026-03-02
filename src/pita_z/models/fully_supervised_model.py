@@ -191,21 +191,49 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self,
         model=None,
         loss_type='bce',
-        lr=None,
-        lr_scheduler=None,
         alpha_grid=None,
         y_grid=None,
-        cde_init_type='uniform'
+        cde_init_type='uniform',
+        lr=None,
+        lr_scheduler=None,
+        
+        # cosine lr params
+        cosine_T_max=500,
+        cosine_eta_min=1e-6,
+
+        # multistep lr params
+        multistep_milestones=[1500],
+        multistep_gamma=0.1,
+
+        # warmupcosine lr params
+        warmupcosine_warmup_epochs=200,
+        warmupcosine_half_period=900,
+        warmupcosine_min_lr=1e-6,
+
+        #wc_ann lr params
+        wc_ann_warmup_epochs=200,
+        wc_ann_half_period=900,
+        wc_ann_min_lr=1e-6
     ):
         super().__init__()
         self.model = model
         self.loss_type = loss_type
-        self.lr = lr
-        self.lr_scheduler = lr_scheduler
         self.register_buffer("alpha_grid", torch.as_tensor(alpha_grid, dtype=torch.float32))
         self.register_buffer("y_grid", torch.as_tensor(y_grid, dtype=torch.float32))
         if cde_init_type == 'uniform':
             self.register_buffer("cde_init", torch.full((len(y_grid),), 1/(y_grid[-1]-y_grid[0]), dtype=torch.float32))
+        self.lr = lr
+        self.lr_scheduler = lr_scheduler
+        self.cosine_T_max = cosine_T_max
+        self.cosine_eta_min = cosine_eta_min
+        self.multistep_milestones = multistep_milestones
+        self.multistep_gamma = multistep_gamma
+        self.warmupcosine_warmup_epochs = warmupcosine_warmup_epochs
+        self.warmupcosine_half_period = warmupcosine_half_period
+        self.warmupcosine_min_lr = warmupcosine_min_lr
+        self.wc_ann_warmup_epochs = wc_ann_warmup_epochs
+        self.wc_ann_half_period = wc_ann_half_period
+        self.wc_ann_min_lr = wc_ann_min_lr
 
     def forward(self, x):
         return self.model(x)
@@ -296,9 +324,42 @@ class CalpitPhotometryLightning(pl.LightningModule):
         return loss
         
     def configure_optimizers(self):
-        optim = torch.optim.Adam(self.parameters(), lr=self.lr)
+        optim = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-05)
+
+        if self.lr_scheduler == 'multistep':
+            lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                optimizer=optim,
+                milestones=self.multistep_milestones,
+                gamma=self.multistep_gamma
+            )
+            
+        if self.lr_scheduler == 'cosine':
+            lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer=optim,
+                T_max=self.cosine_T_max,
+                eta_min=self.cosine_eta_min
+            )
+
+        if self.lr_scheduler == 'warmupcosine':
+            lr_scheduler = WarmupCosine(
+                optimizer=optim,
+                warmup_epochs=self.warmupcosine_warmup_epochs,
+                cos_half_period=self.warmupcosine_half_period,
+                min_lr=self.warmupcosine_min_lr
+            )
+
+        if self.lr_scheduler == 'wc_ann':
+            lr_scheduler = WarmupCosineAnnealingScheduler(
+                optimizer=optim,
+                warmup_epochs=self.wc_ann_warmup_epochs,
+                cos_half_period=self.wc_ann_half_period,
+                min_lr=self.wc_ann_min_lr
+            )
+
         if self.lr_scheduler is None:
             return optim
+        else:
+            return [optim], [lr_scheduler]
                 
 
 class CalpitCNNPhotoz(pl.LightningModule):

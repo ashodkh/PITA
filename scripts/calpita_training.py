@@ -112,6 +112,10 @@ if __name__ == '__main__':
             config['model']['redshift_mlp_hidden_layers']
         )
 
+    lr_scheduler_config = config['training']['lr_scheduler']
+    scheduler_type = lr_scheduler_config['type']
+    scheduler_params = lr_scheduler_config[scheduler_type]
+    
     pl_model = pita_model.CalPITALightning(
         encoder=encoder,
         encoder_mlp=encoder_mlp,
@@ -131,9 +135,9 @@ if __name__ == '__main__':
         redshift_loss_weight=config['training']['redshift_loss_weight'],
         color_loss_weight=config['training']['color_loss_weight'],
         lr=config['training']['learning_rate'],
-        lr_scheduler=config['training']['lr_scheduler']['type'],
-        cosine_T_max=config['training']['lr_scheduler']['cosine']['T_max'],
-        cosine_eta_min=config['training']['lr_scheduler']['cosine']['eta_min']
+        #lr_scheduler=None,
+        lr_scheduler=scheduler_type,
+        **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'

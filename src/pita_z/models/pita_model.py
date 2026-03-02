@@ -58,7 +58,12 @@ class PITALightning(pl.LightningModule):
         # warmupcosine lr params
         warmupcosine_warmup_epochs=200,
         warmupcosine_half_period=900,
-        warmupcosine_min_lr=1e-6
+        warmupcosine_min_lr=1e-6,
+
+        #wc_ann lr params
+        wc_ann_warmup_epochs=100,
+        wc_ann_half_period=900,
+        wc_ann_min_lr=1e-6
     ):
         super().__init__()
         self.encoder = encoder
@@ -81,6 +86,9 @@ class PITALightning(pl.LightningModule):
         self.warmupcosine_warmup_epochs = warmupcosine_warmup_epochs
         self.warmupcosine_half_period = warmupcosine_half_period
         self.warmupcosine_min_lr = warmupcosine_min_lr
+        self.wc_ann_warmup_epochs = wc_ann_warmup_epochs
+        self.wc_ann_half_period = wc_ann_half_period
+        self.wc_ann_min_lr = wc_ann_min_lr
         
         # Initialize the momentum (key) encoder and its heads as copies of the original
         self.momentum_encoder = copy.deepcopy(self.encoder)
@@ -332,6 +340,13 @@ class PITALightning(pl.LightningModule):
                 cos_half_period=self.warmupcosine_half_period,
                 min_lr=self.warmupcosine_min_lr
             )
+        if self.lr_scheduler == 'wc_ann':
+            lr_scheduler = WarmupCosineAnnealingScheduler(
+                optimizer=optim,
+                warmup_epochs=self.wc_ann_warmup_epochs,
+                cos_half_period=self.wc_ann_half_period,
+                min_lr=self.wc_ann_min_lr
+            )
 
         if self.lr_scheduler is None:
             return optim
@@ -397,7 +412,12 @@ class CalPITALightning(pl.LightningModule):
         # warmupcosine lr params
         warmupcosine_warmup_epochs=200,
         warmupcosine_half_period=900,
-        warmupcosine_min_lr=1e-6
+        warmupcosine_min_lr=1e-6,
+
+        #wc_ann lr params
+        wc_ann_warmup_epochs=100,
+        wc_ann_half_period=900,
+        wc_ann_min_lr=1e-6
     ):
         super().__init__()
         self.encoder = encoder
@@ -426,6 +446,9 @@ class CalPITALightning(pl.LightningModule):
         self.warmupcosine_warmup_epochs = warmupcosine_warmup_epochs
         self.warmupcosine_half_period = warmupcosine_half_period
         self.warmupcosine_min_lr = warmupcosine_min_lr
+        self.wc_ann_warmup_epochs = wc_ann_warmup_epochs
+        self.wc_ann_half_period = wc_ann_half_period
+        self.wc_ann_min_lr = wc_ann_min_lr
         
         # Initialize the momentum (key) encoder and its heads as copies of the original
         self.momentum_encoder = copy.deepcopy(self.encoder)
@@ -737,6 +760,14 @@ class CalPITALightning(pl.LightningModule):
                 min_lr=self.warmupcosine_min_lr
             )
 
+        if self.lr_scheduler == 'wc_ann':
+            lr_scheduler = WarmupCosineAnnealingScheduler(
+                optimizer=optim,
+                warmup_epochs=self.wc_ann_warmup_epochs,
+                cos_half_period=self.wc_ann_half_period,
+                min_lr=self.wc_ann_min_lr
+            )
+            
         if self.lr_scheduler is None:
             return optim
         else:

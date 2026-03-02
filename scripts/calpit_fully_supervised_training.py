@@ -23,7 +23,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/calpit/rubin_dp1/configs/'
+config_dir = '/global/homes/a/ashodkh/calpit/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -105,11 +105,22 @@ if __name__ == '__main__':
     encoder = models.convnext_tiny(weights=None)
     encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 96, kernel_size=(4,4), stride=(4,4))
     encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
-    redshift_mlp = calpit.nn.models.MLP(
-            latent_d+1, # 4 photometric fluxes + 1 alpha
-            config['model']['redshift_mlp_hidden_layers']
+    if config['model']['type'] == 'MLP':
+        redshift_mlp = calpit.nn.models.MLP(
+                latent_d+1, # 4 photometric fluxes + 1 alpha
+                config['model']['redshift_mlp_hidden_layers']
+            )
+    elif config['model']['type'] == 'UMNN':
+        redshift_mlp = calpit.nn.umnn.MonotonicNN(
+            latent_d+1,
+            config['model']['redshift_mlp_hidden_layers'],
+            sigmoid=True
         )
 
+    lr_scheduler_config = config['training']['lr_scheduler']
+    scheduler_type = lr_scheduler_config['type']
+    scheduler_params = lr_scheduler_config[scheduler_type]
+    
     pl_model = fully_supervised_model.CalpitCNNPhotoz(
         encoder=encoder,
         encoder_mlp=encoder_mlp,
@@ -121,21 +132,19 @@ if __name__ == '__main__':
         transforms=transforms,
         transforms_val=augmentations.JitterCrop(output_dim=config['augmentations']['crop_dim'], jitter_lim=0),
         lr=config['training']['learning_rate'],
-        lr_scheduler=config['training']['lr_scheduler']['type'],
-        wc_ann_warmup_epochs=config['training']['lr_scheduler']['wc_ann']['warmup_epochs'],
-        wc_ann_half_period=config['training']['lr_scheduler']['wc_ann']['half_period'],
-        wc_ann_min_lr=config['training']['lr_scheduler']['wc_ann']['min_lr']
+        lr_scheduler=scheduler_type,
+        **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
     
     checkpoint_callback = ModelCheckpoint(
-        monitor='epoch',
-        mode='max',
+        #monitor='epoch',
+        #mode='max',
         dirpath=config['logging_and_checkpoint']['dir_checkpoint'],
         filename=checkpoint_filename,
         every_n_epochs=config['logging_and_checkpoint']['every_n_epochs'],
-        save_top_k=20,
+        save_top_k=-1,
         enable_version_counter=False
     )
     
@@ -153,7 +162,7 @@ if __name__ == '__main__':
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/calpit/rubin_dp1/scripts",
+        default_root_dir="/global/homes/a/ashodkh/calpit/scripts",
         strategy='ddp',
         logger=tb_logger,
         enable_progress_bar=False,
