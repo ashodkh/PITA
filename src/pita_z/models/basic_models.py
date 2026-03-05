@@ -7,11 +7,10 @@ class MLP(nn.Module):
     """
     A multi-layer perceptron (MLP) with customizable hidden layers.
     
-    Args:
+    Attributes:
         - input_dim (int): The input dimension to the first fully connected layer (default: 512).
         - hidden_layers (list of int): List specifying the number of units in each hidden layer.
         - output_dim (int): Output dimensions.
-        
     """
     def __init__(self, input_dim: int=512, hidden_layers: list=[512,512,128], output_dim=1):
         super().__init__()
@@ -46,11 +45,11 @@ class MLP(nn.Module):
 class LipschitzMLP(nn.Module):
     '''
     A multi-layer perceptron (MLP) with customizable hidden layers that is Lipschitz bounded with p=1.
-    Args:
+    
+    Attributes:
         - input_dim (int): The input dimension to the first fully connected layer (default: 512).
         - hidden_layers (list of int): List specifying the number of units in each hidden layer.
         - output_dim (int): Output dimensions.
-
     '''
     def __init__(self, input_dim: int=512, hidden_layers: list=[512,512,128], output_dim=1):
         super().__init__()
@@ -87,6 +86,10 @@ class MonotonicMLP(nn.Module):
     '''
     Combines LipschitzMLP with monotonic wrapper and adds sigmoig at the end.
 
+    Attributes:
+        lipschitz_mlp (nn.Module): Lipschitz MLP.
+        monotonic_constraints (list): Specifies which variables will be monotonic.
+        lipschitz_const (float): Lipschitz constant that determines the maximum value of the derivative.
     '''
     def __init__(self, lipschitz_mlp, monotonic_constraints, lipschitz_const):
         super().__init__()
@@ -103,13 +106,12 @@ class ConvBlock(nn.Module):
     """
     A custom convolutional block with Pytorch that consists of two convolution layers.
     
-    Args:
+    Attributes:
         - in_channels (int): Number of channels in the input.
         - out_channels (int): Number of channels produced by the convolution.
         - kernel_size (int): Size of the convolving kernel (default: 3).
         - stride (int): Stride of the convolution (default: 1).
         - padding (int): Padding added to all four sides of the input (default: 1).
-        
     """
 
     def __init__(self, in_channels: int=None, out_channels: int=None,
@@ -141,12 +143,11 @@ class ConvBlock(nn.Module):
         """
         Defines the forward pass through the convolutional block.
         
-        Args:
+        Attributes:
             - x (Pytroch Tensor): Input image.
         
         Returns:
             - Pytorch Tensor with out_channels channels.
-            
         """
         input_x = x
         out = self.conv1(x)
@@ -163,11 +164,10 @@ class JointBlocks(nn.Module):
     """
     A PyTorch module that combines multiple convolutional blocks and average pooling layers.
     
-    Args:
+    Attributes:
         - input_channels (int): Number of input channels for the first convolutional block (default: 32).
         - block_channels (list of int): List specifying the output channels for each convolutional block.
-        - avg_pooling_layers (list of int): List specifying the kernel size for each average pooling layer.
-        
+        - avg_pooling_layers (list of int): List specifying the kernel size for each average pooling layer.  
     """
     def __init__(self, input_channels: int=32, block_channels: list=[32,64,128], avg_pooling_layers: list=[2,2,4]):
         super().__init__()
@@ -210,11 +210,10 @@ class Encoder(nn.Module):
     """
     A PyTorch encoder module that applies an initial convolution layer followed by joint blocks.
     
-    Args:
+    Attributes:
         - input_channels (int): Number of input channels (default: 4).
         - first_layer_output_channels (int): Number of output channels after the first convolution (default: 32).
         - joint_blocks (nn.Module): A module containing several convolutional blocks.
-        
     """
         
     def __init__(self, input_channels: int=4, first_layer_output_channels: int=32, joint_blocks: nn.Module=None):
