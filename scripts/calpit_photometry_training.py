@@ -6,7 +6,6 @@ import yaml
 import argparse
 import calpit
 import h5py
-import monotonicnetworks as lmn
 
 # import custom modules
 from pita_z.data_modules import data_modules
@@ -36,13 +35,12 @@ if __name__ == '__main__':
         y_train = f_train['redshifts'][:].astype('float32').clip(z_min,z_max)
     with h5py.File(path_val, 'r') as f_val:
         y_val = f_val['redshifts'][:].astype('float32').clip(z_min,z_max)
-        
+
+    # defining a grid of redshifts and calculating initial cde guess
     initial_cde_type = config['initial_cde']['type']
     if initial_cde_type == 'uniform':
-        n_bin_edges = config['initial_cde']['n_bin_edges']
-        z_bin_edges = np.linspace(z_min, z_max, n_bin_edges, dtype='float32')
-        z_grid = (z_bin_edges[1:] + z_bin_edges[:-1]) / 2
-        n_grid = len(z_grid)
+        n_grid = config['initial_cde']['n_grid']
+        z_grid = np.linspace(z_min, z_max, n_grid, dtype='float32')
         d_z = z_grid[1] - z_grid[0]
 
         cde_train = np.zeros((y_train.shape[0],n_grid), dtype='float32')
@@ -51,6 +49,7 @@ if __name__ == '__main__':
         cde_val = np.zeros((y_val.shape[0],n_grid), dtype='float32')
         cde_val[:,:] = 1 / (z_max - z_min)
 
+    # these pits are used to calculate the loss function (typical y or output)
     pit_train = calpit.metrics.probability_integral_transform(
         cde_train,
         z_grid,
@@ -98,6 +97,7 @@ if __name__ == '__main__':
         )
         
 
+    # Various learning rate schedulers can be used. Set in the config file.
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
     scheduler_params = lr_scheduler_config[scheduler_type]
@@ -113,7 +113,8 @@ if __name__ == '__main__':
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
-    
+
+    # saving models during training
     checkpoint_callback = ModelCheckpoint(
         #monitor='epoch',
         #mode='max',

@@ -7,6 +7,21 @@ from joblib import load
 from pathlib import Path
 
 class ImagesDataset(torch.utils.data.Dataset):
+    """
+    PyTorch dataset that uses h5py and memory mapping to read images, redshift, and other metadata.
+    MW extinction can be removed by using a reddening transform.
+
+    Attributes:
+        path_file (str): Path to h5py file.
+        with_redshift (bool): If True, reads and returns redshift.
+        with_features (bool): If True, reads and returns photometric features (dereddened colors and magnitudes).
+        with_weights (bool): If True, reads and returns weights associated with redshifts. 
+                             The weights are 1 if objects have a redshift label, and 0 otherwise.
+        reddening_transform (class): Removes MW extinction using E(B-V).
+        load_ebv (bool): If True, loads and returns E(B-V) values.
+        label_f (int): Fraction of redshift labels to use when training (1/label_f is the fraction).
+                       Loads different redshift weights based on the fraction.
+    """
     def __init__(
         self,
         path_file: str = None,
@@ -47,6 +62,25 @@ class ImagesDataset(torch.utils.data.Dataset):
 
         
 class ImagesDataModule(pl.LightningDataModule):
+    """
+    PyTorch Lightning data module that creates ImagesDatasets and uses PyTorch dataloaders.
+
+    Attributes:
+        batch_size (int): Batch size.
+        num_workers (int): number of workers used in DataLoader.
+        train_size (float): Fraction of data used for training. Only used if path_val is None.
+        path_train (str): Path to h5py file that contains the training set.
+        path_val (str): Path to h5py file that contains the validation set.
+        with_redshift (bool): If True, reads and returns redshift.
+        with_features (bool): If True, reads and returns photometric features (dereddened colors and magnitudes).
+        with_weights (bool): If True, reads and returns weights associated with redshifts.
+                             The weights are 1 if objects have a redshift label, and 0 otherwise.
+        reddening_transform (class): Removes MW extinction using E(B-V).
+        load_ebv (bool): If True, loads and returns E(B-V) values.
+        label_f (int): Fraction of redshift labels to use when training (1/label_f is the fraction).
+                       Loads different redshift weights based on the fraction.
+        
+    """
     def __init__(
         self,
         batch_size: int = 128,
@@ -117,9 +151,20 @@ class ImagesDataModule(pl.LightningDataModule):
         )
 
 class CalpitPhotometryDataset(torch.utils.data.Dataset):
-    def __init__(self, file_path=None, feature_name=None, pit=None, scaler_path=None):
-        if Path(file_path).suffix == '.hdf5':
-            self.file = h5py.File(file_path, 'r')
+    """
+    PyTorch dataset that uses h5py and memory mapping to read photometry, redshift, and other metadata.
+    Takes in PITs and returns them per object. PITs are the outputs or the 'true y' values that are used to calculate the Cal-PIT loss.
+    Assumes that photometry are corrected for MW extinction. Their column name in the dataset is a variable that can be set with 'feature_name'.
+
+    Attributes:
+        path_file (str): Path to h5py file.
+        feature_name (str): Column name of features in the dataset.
+        pit (np.array): PIT values of the outputs.
+        scaler_path (str): Path to scikit-learn StandardScaler for rescaling the features.
+    """
+    def __init__(self, path_file=None, feature_name=None, pit=None, scaler_path=None):
+        if Path(path_file).suffix == '.hdf5':
+            self.file = h5py.File(path_file, 'r')
         self.feature_name = feature_name
         self.pit = pit
         self.scaler = load(scaler_path) if scaler_path else None
@@ -138,6 +183,19 @@ class CalpitPhotometryDataset(torch.utils.data.Dataset):
         return x.squeeze(), self.pit[idx], self.file['redshifts'][idx].astype(np.float32)
     
 class CalpitPhotometryDataModule(pl.LightningDataModule):
+    """
+    PyTorch Lightning data module that creates CalpitPhotometryDataset and uses PyTorch dataloaders.
+
+    Attributes:
+        path_train (str): Path to h5py file that contains the training set.
+        feature_name (str): Column name of features in the dataset.
+        pit_train (np.array): PIT values for training set.
+        scaler_path (str): Path to scikit-learn StandardScaler for rescaling the features.
+        path_val (str): Path to h5py file that contains the validation set.
+        pit_val (np.array): PIT values for training set.
+        batch_size (int): Batch size.
+        num_workers (int): number of workers used in DataLoader.
+    """
     def __init__(
         self,
         path_train: str=None,
@@ -161,14 +219,14 @@ class CalpitPhotometryDataModule(pl.LightningDataModule):
 
     def setup(self, stage):
         self.ds_train = CalpitPhotometryDataset(
-            file_path=self.path_train,
+            path_file=self.path_train,
             feature_name=self.feature_name,
             pit=self.pit_train,
             scaler_path=self.scaler_path
         )
 
         self.ds_val = CalpitPhotometryDataset(
-            file_path=self.path_val,
+            path_file=self.path_val,
             feature_name=self.feature_name,
             pit=self.pit_val,
             scaler_path=self.scaler_path
@@ -181,6 +239,23 @@ class CalpitPhotometryDataModule(pl.LightningDataModule):
         return DataLoader(self.ds_val, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, persistent_workers=True, pin_memory=torch.cuda.is_available())
 
 class CalpitImagesDataset(torch.utils.data.Dataset):
+    """
+    PyTorch dataset that uses h5py and memory mapping to read images, redshift, and other metadata.
+    Takes in PITs and returns them per object. PITs are the outputs or the 'true y' values that are used to calculate the Cal-PIT loss.
+    MW extinction can be removed by using a reddening transform.
+
+    Attributes:
+        path_file (str): Path to h5py file.
+        pit (np.array): PIT values of the outputs.
+        with_redshift (bool): If True, reads and returns redshift.
+        with_features (bool): If True, reads and returns photometric features (dereddened colors and magnitudes).
+        with_weights (bool): If True, reads and returns weights associated with redshifts.
+                             The weights are 1 if objects have a redshift label, and 0 otherwise.
+        reddening_transform (class): Removes MW extinction using E(B-V).
+        load_ebv (bool): If True, loads and returns E(B-V) values.
+        label_f (int): Fraction of redshift labels to use when training (1/label_f is the fraction).
+                       Loads different redshift weights based on the fraction.
+    """
     def __init__(
         self,
         path_file: str = None,
@@ -223,6 +298,25 @@ class CalpitImagesDataset(torch.utils.data.Dataset):
             return image.astype(np.float32), self.pit[idx]
 
 class CalpitImagesDataModule(pl.LightningDataModule):
+    """
+    PyTorch Lightning data module that creates CalpitImagesDataset and uses PyTorch dataloaders.
+
+    Attributes:
+        batch_size (int): Batch size.
+        num_workers (int): number of workers used in DataLoader.
+        path_train (str): Path to h5py file that contains the training set.
+        pit_train (np.array): PIT values for training set.
+        path_val (str): Path to h5py file that contains the validation set.
+        pit_val (np.array): PIT values for validation set.
+        with_redshift (bool): If True, reads and returns redshift.
+        with_features (bool): If True, reads and returns photometric features (dereddened colors and magnitudes).
+        with_weights (bool): If True, reads and returns weights associated with redshifts.
+                             The weights are 1 if objects have a redshift label, and 0 otherwise.
+        reddening_transform (class): Removes MW extinction using E(B-V).
+        load_ebv (bool): If True, loads and returns E(B-V) values.
+        label_f (int): Fraction of redshift labels to use when training (1/label_f is the fraction).
+                       Loads different redshift weights based on the fraction.
+    """
     def __init__(
         self,
         batch_size: int = 128,

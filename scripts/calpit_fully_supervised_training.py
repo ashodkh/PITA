@@ -43,10 +43,8 @@ if __name__ == '__main__':
         
     initial_cde_type = config['initial_cde']['type']
     if initial_cde_type == 'uniform':
-        n_bin_edges = config['initial_cde']['n_bin_edges']
-        z_bin_edges = np.linspace(z_min, z_max, n_bin_edges, dtype='float32')
-        z_grid = (z_bin_edges[1:] + z_bin_edges[:-1]) / 2
-        n_grid = len(z_grid)
+        n_grid = config['initial_cde']['n_grid']
+        z_grid = np.linspace(z_min, z_max, n_grid, dtype='float32')
         d_z = z_grid[1] - z_grid[0]
 
         cde_train = np.zeros((y_train.shape[0],n_grid), dtype='float32')
