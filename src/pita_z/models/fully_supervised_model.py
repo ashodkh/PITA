@@ -9,13 +9,27 @@ class CNNPhotoz(pl.LightningModule):
     """
     A PyTorch Lightning module for CNN photo-z.
 
-    Args:
+    Attributes:
         encoder (nn.Module): A CNN encoder.
         encoder_mlp (nn.Module, optional): An optional MLP that projects encoder outputs to a lower dimension.
         redshift_mlp (nn.Module): The final MLP for redshift prediction.
         lr (float): Learning rate for the optimizer.
         transforms (callable): Optional image augmentations. 
         lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
+
+        cosine_T_max (int): Number of epochs for cosine annealing cycle. Defaults to 500.
+        cosine_eta_min (float): Minimum LR for cosine scheduler. Defaults to 1e-6.
+
+        multistep_milestones (list[int]): Epochs at which to decay LR. Defaults to [1500].
+        multistep_gamma (float): Multiplicative LR decay factor. Defaults to 0.1.
+
+        warmupcosine_warmup_epochs (int): Number of warmup epochs. Defaults to 200.
+        warmupcosine_half_period (int): Half-period of cosine cycle in epochs. Defaults to 900.
+        warmupcosine_min_lr (float): Minimum LR after decay. Defaults to 1e-6.
+
+        wc_ann_warmup_epochs (int): Number of warmup epochs for annealed schedule. Defaults to 200.
+        wc_ann_half_period (int): Half-period of annealed cosine cycle. Defaults to 900.
+        wc_ann_min_lr (float): Minimum LR for annealed schedule. Defaults to 1e-6.
     """
     
     def __init__(
@@ -187,6 +201,32 @@ class CNNPhotoz(pl.LightningModule):
             return [optim], [lr_scheduler]
 
 class CalpitPhotometryLightning(pl.LightningModule):
+    """
+    A PyTorch Lightning module for Cal-PIT with photometry.
+
+    Attributes:
+        model (nn.module): Model that learns regression from features to PIT.
+        loss_type (str): Specifics loss function.
+        alpha_grid (np.array): Grid of PIT values [0,1] that is used to calculate validation loss.
+        y_grid (np.array): Grid of y variable (redshift) on which CDEs are calculated.
+        cde_init_type (str): Specifics initial CDE guess.
+        lr (float): Learning rate for the optimizer.
+        lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
+
+        cosine_T_max (int): Number of epochs for cosine annealing cycle. Defaults to 500.
+        cosine_eta_min (float): Minimum LR for cosine scheduler. Defaults to 1e-6.
+
+        multistep_milestones (list[int]): Epochs at which to decay LR. Defaults to [1500].
+        multistep_gamma (float): Multiplicative LR decay factor. Defaults to 0.1.
+
+        warmupcosine_warmup_epochs (int): Number of warmup epochs. Defaults to 200.
+        warmupcosine_half_period (int): Half-period of cosine cycle in epochs. Defaults to 900.
+        warmupcosine_min_lr (float): Minimum LR after decay. Defaults to 1e-6.
+
+        wc_ann_warmup_epochs (int): Number of warmup epochs for annealed schedule. Defaults to 200.
+        wc_ann_half_period (int): Half-period of annealed cosine cycle. Defaults to 900.
+        wc_ann_min_lr (float): Minimum LR for annealed schedule. Defaults to 1e-6.
+    """
     def __init__(
         self,
         model=None,
@@ -240,10 +280,12 @@ class CalpitPhotometryLightning(pl.LightningModule):
 
     def transform(self, x):
         """
-        Transforms the input CDEs to the calibrated CDEs.
+        Transforms the initial CDE guesses to the calibrated CDEs.
         """
+        # Making an array of initial CDEs
         cde_init = torch.tile(self.cde_init, (x.shape[0],1))
         cdf_init = trapz_grid_torch(cde_init, self.y_grid)
+        # Initial CDFs are the initial PIT guesses
         features = torch.cat(
             [
                 torch.ravel(cdf_init)[:,None],
@@ -251,7 +293,11 @@ class CalpitPhotometryLightning(pl.LightningModule):
             ],
             dim = -1
         )
+        # Given x and initial PIT guess, the model predicts what the PIT should be.
+        # This PIT on the y-grid is actually the true CDF (if regression is working).
         cdf_new = self.forward(features.float()).reshape((x.shape[0], len(self.y_grid)))
+
+        # Interpolating the predicted CDF, whose derivative is the CDE.
         cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
         pdf_func = cdf_new_funct.derivative(1)
         cde_new = pdf_func(self.y_grid.detach().cpu())
@@ -267,6 +313,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         n_batch = x.shape[0]
         alphas = torch.rand(n_batch, device=x.device)
         x = torch.hstack([alphas[:,None], x])
+        # Calculating the binary variable W. Mean of W is the true PIT.
         y = (y <= alphas).float()
 
         outputs = self.model(x)
@@ -274,6 +321,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
         self.log("training_loss", loss, on_epoch=True, sync_dist=True)
 
+        # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
         batch_cdes = self.transform(x[:,1:])
         max_idxs = torch.argmax(batch_cdes, axis=1)
         max_ys = self.y_grid[max_idxs]
@@ -294,6 +342,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         x_device = x.device
         n_batch = x.shape[0]
         n_alphas = len(self.alpha_grid)
+        # Validation is done on the whole range [0,1] of PIT.
         features = torch.cat(
             [
                 torch.repeat_interleave(self.alpha_grid, n_batch)[:,None],
@@ -308,6 +357,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
         self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
 
+        # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
         batch_cdes = self.transform(x)
         max_idxs = torch.argmax(batch_cdes, axis=1)
         max_ys = self.y_grid[max_idxs]
@@ -366,7 +416,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
     """
     A PyTorch Lightning module for Calpit CNN photo-z.
 
-    Args:
+    Attributes:
         encoder (nn.Module): A CNN encoder.
         encoder_mlp (nn.Module, optional): An optional MLP that projects encoder outputs to a lower dimension.
         redshift_mlp (nn.Module): The final MLP for redshift prediction.
@@ -378,6 +428,20 @@ class CalpitCNNPhotoz(pl.LightningModule):
         transforms_val (callable): Optional image augmentations for the validation set.
         lr (float): Learning rate for the optimizer.
         lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
+
+        cosine_T_max (int): Number of epochs for cosine annealing cycle. Defaults to 500.
+        cosine_eta_min (float): Minimum LR for cosine scheduler. Defaults to 1e-6.
+
+        multistep_milestones (list[int]): Epochs at which to decay LR. Defaults to [1500].
+        multistep_gamma (float): Multiplicative LR decay factor. Defaults to 0.1.
+
+        warmupcosine_warmup_epochs (int): Number of warmup epochs. Defaults to 200.
+        warmupcosine_half_period (int): Half-period of cosine cycle in epochs. Defaults to 900.
+        warmupcosine_min_lr (float): Minimum LR after decay. Defaults to 1e-6.
+
+        wc_ann_warmup_epochs (int): Number of warmup epochs for annealed schedule. Defaults to 200.
+        wc_ann_half_period (int): Half-period of annealed cosine cycle. Defaults to 900.
+        wc_ann_min_lr (float): Minimum LR for annealed schedule. Defaults to 1e-6.
     """
     
     def __init__(
@@ -438,7 +502,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
         
     def forward(self, x, goal='train'):
         """
-        Forward pass through the encoder, optional MLP, and the final MLP. Adds alphas before final MLP
+        Forward pass through the encoder, optional MLP, and the final MLP. Adds alphas before final MLP.
         """
         x = self.encoder(x)
         x = self.encoder_mlp(x)
@@ -464,9 +528,12 @@ class CalpitCNNPhotoz(pl.LightningModule):
     def transform_cde(self, x):
         """
         Transforms the input CDEs to the calibrated CDEs.
-        """
+        """        
+        # Making an array of initial CDEs
         cde_init = torch.tile(self.cde_init, (x.shape[0],1))
         cdf_init = trapz_grid_torch(cde_init, self.y_grid)
+        # Initial CDFs are the initial PIT guesses. 
+        # The PIT guesses are concatenated to latent vectors.
         features = self.encoder_mlp(self.encoder(x))
         features = torch.cat(
             [
@@ -475,7 +542,10 @@ class CalpitCNNPhotoz(pl.LightningModule):
             ],
             dim = -1
         )
+        # Given latent vectors and initial PIT guess, the model predicts what the PIT should be.
+        # This PIT on the y-grid is actually the true CDF (if regression is working).
         cdf_new = self.redshift_mlp(features.float()).reshape((x.shape[0], len(self.y_grid)))
+        # Interpolating the predicted CDF, whose derivative is the CDE.
         cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
         pdf_func = cdf_new_funct.derivative(1)
         cde_new = pdf_func(self.y_grid.detach().cpu())
@@ -494,14 +564,17 @@ class CalpitCNNPhotoz(pl.LightningModule):
 
         if self.transforms:
             batch_images = self.transforms(batch_images)
-            
+
+        # alphas (PITs) are concatenated to the latent vectors.
+        # To do so, they are generated randomly in the forward function (if goal='Train').
+        # forward function also returns these random alphas to calculate W (binary PIT variable) and loss.
         batch_predictions, alphas = self.forward(batch_images, goal='train')
         y = (batch_pits <= alphas).float()
         loss = self.loss_fn(batch_predictions, torch.squeeze(y))
         
         self.log("training_loss", loss, on_epoch=True, sync_dist=True)
         
-        # Compute metrics (bias, NMAD, and outlier fraction) and log them
+        # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
         batch_cdes = self.transform_cde(batch_images)
         max_idxs = torch.argmax(batch_cdes, axis=1)
         max_ys = self.y_grid[max_idxs]
@@ -525,7 +598,9 @@ class CalpitCNNPhotoz(pl.LightningModule):
         
         if self.transforms_val:
             batch_images = self.transforms_val(batch_images)
-        
+
+        # Validation is done on the whole range [0,1] of PIT.
+        # So they don't need to be generated in the forward function (goal='validate').
         batch_predictions, _ = self.forward(batch_images, goal='validate')
         n_batch = batch_images.shape[0]
         n_alphas = len(self.alpha_grid)
@@ -534,7 +609,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
         loss = self.loss_fn(batch_predictions, torch.squeeze(y))
         self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
 
-        # Compute metrics (bias, NMAD, and outlier fraction) and log them
+        # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
         batch_cdes = self.transform_cde(batch_images)
         max_idxs = torch.argmax(batch_cdes, axis=1)
         max_ys = self.y_grid[max_idxs]
