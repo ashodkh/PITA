@@ -40,7 +40,8 @@ if __name__ == '__main__':
         y_train = f_train['redshifts'][:].astype('float32').clip(z_min,z_max)
     with h5py.File(path_val, 'r') as f_val:
         y_val = f_val['redshifts'][:].astype('float32').clip(z_min,z_max)
-        
+
+    # defining a grid of redshifts and calculating initial cde guess
     initial_cde_type = config['initial_cde']['type']
     if initial_cde_type == 'uniform':
         n_grid = config['initial_cde']['n_grid']
@@ -53,6 +54,7 @@ if __name__ == '__main__':
         cde_val = np.zeros((y_val.shape[0],n_grid), dtype='float32')
         cde_val[:,:] = 1 / (z_max - z_min)
 
+    # these pits are used to calculate the loss function (typical y or output)
     pit_train = calpit.metrics.probability_integral_transform(
         cde_train,
         z_grid,
@@ -97,9 +99,7 @@ if __name__ == '__main__':
     )
      
     ## prepping model
-
     latent_d = config['model']['latent_d']
-    
     encoder = models.convnext_tiny(weights=None)
     encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 96, kernel_size=(4,4), stride=(4,4))
     encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
@@ -115,9 +115,13 @@ if __name__ == '__main__':
             sigmoid=True
         )
 
+    # Various learning rate schedulers can be used. Set in the config file.
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
     scheduler_params = lr_scheduler_config[scheduler_type]
+    if scheduler_type == 'None':
+        # if None, scheduler_params are dummy params from config
+        scheduler_type = None
     
     pl_model = fully_supervised_model.CalpitCNNPhotoz(
         encoder=encoder,
@@ -135,7 +139,7 @@ if __name__ == '__main__':
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
-    
+    # saving models during training
     checkpoint_callback = ModelCheckpoint(
         #monitor='epoch',
         #mode='max',

@@ -101,7 +101,10 @@ if __name__ == '__main__':
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
     scheduler_params = lr_scheduler_config[scheduler_type]
-    
+    if scheduler_type == 'None':
+        # if None, scheduler_params are dummy params from config
+        scheduler_type = None
+        
     pl_model = fully_supervised_model.CalpitPhotometryLightning(
         model=model,
         alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),

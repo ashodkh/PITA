@@ -307,7 +307,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         if self.loss_type == 'bce':
             loss = torch.nn.BCELoss(reduction='mean')
             return loss(predictions, truths)
-        
+
     def training_step(self, batch, batch_idx):
         x, y, true_redshifts = batch
         n_batch = x.shape[0]
@@ -502,7 +502,9 @@ class CalpitCNNPhotoz(pl.LightningModule):
         
     def forward(self, x, goal='train'):
         """
-        Forward pass through the encoder, optional MLP, and the final MLP. Adds alphas before final MLP.
+        Forward pass through the encoder and MLPs.
+        If goal is 'train', then a random alpha is generated and concatenated to the latent vector.
+        If goal is to 'validate', then alpha_grid is concatenated to the latent vector.
         """
         x = self.encoder(x)
         x = self.encoder_mlp(x)
@@ -567,7 +569,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
 
         # alphas (PITs) are concatenated to the latent vectors.
         # To do so, they are generated randomly in the forward function (if goal='Train').
-        # forward function also returns these random alphas to calculate W (binary PIT variable) and loss.
+        # forward function also returns these random alphas to calculate true W (binary PIT variable) and loss.
         batch_predictions, alphas = self.forward(batch_images, goal='train')
         y = (batch_pits <= alphas).float()
         loss = self.loss_fn(batch_predictions, torch.squeeze(y))

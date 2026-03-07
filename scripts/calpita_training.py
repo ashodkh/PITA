@@ -23,7 +23,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/calpit/rubin_dp1/configs/'
+config_dir = '/global/homes/a/ashodkh/calpit/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -40,13 +40,12 @@ if __name__ == '__main__':
         y_train = f_train['redshifts'][:].astype('float32').clip(z_min,z_max)
     with h5py.File(path_val, 'r') as f_val:
         y_val = f_val['redshifts'][:].astype('float32').clip(z_min,z_max)
-        
+
+    # defining a grid of redshifts and calculating initial cde guess
     initial_cde_type = config['initial_cde']['type']
     if initial_cde_type == 'uniform':
-        n_bin_edges = config['initial_cde']['n_bin_edges']
-        z_bin_edges = np.linspace(z_min, z_max, n_bin_edges, dtype='float32')
-        z_grid = (z_bin_edges[1:] + z_bin_edges[:-1]) / 2
-        n_grid = len(z_grid)
+        n_grid = config['initial_cde']['n_grid']
+        z_grid = np.linspace(z_min, z_max, n_grid, dtype='float32')
         d_z = z_grid[1] - z_grid[0]
 
         cde_train = np.zeros((y_train.shape[0],n_grid), dtype='float32')
@@ -55,6 +54,7 @@ if __name__ == '__main__':
         cde_val = np.zeros((y_val.shape[0],n_grid), dtype='float32')
         cde_val[:,:] = 1 / (z_max - z_min)
 
+    # these pits are used to calculate the loss function (typical y or output)
     pit_train = calpit.metrics.probability_integral_transform(
         cde_train,
         z_grid,
@@ -107,15 +107,26 @@ if __name__ == '__main__':
     encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
     projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128], output_dim=projection_d)
     color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'], output_dim=config['data']['n_filters'])    
-    redshift_mlp = calpit.nn.models.MLP(
-            latent_d+1, # latent vectors + 1 alpha
-            config['model']['redshift_mlp_hidden_layers']
+    if config['model']['type'] == 'MLP':
+        redshift_mlp = calpit.nn.models.MLP(
+                latent_d+1, # 4 photometric fluxes + 1 alpha
+                config['model']['redshift_mlp_hidden_layers']
+            )
+    elif config['model']['type'] == 'UMNN':
+        redshift_mlp = calpit.nn.umnn.MonotonicNN(
+            latent_d+1,
+            config['model']['redshift_mlp_hidden_layers'],
+            sigmoid=True
         )
 
+    # Various learning rate schedulers can be used. Set in the config file.
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
     scheduler_params = lr_scheduler_config[scheduler_type]
-    
+    if scheduler_type == 'None':
+        # if None, scheduler_params are dummy params from config
+        scheduler_type = None
+        
     pl_model = pita_model.CalPITALightning(
         encoder=encoder,
         encoder_mlp=encoder_mlp,
@@ -135,13 +146,13 @@ if __name__ == '__main__':
         redshift_loss_weight=config['training']['redshift_loss_weight'],
         color_loss_weight=config['training']['color_loss_weight'],
         lr=config['training']['learning_rate'],
-        #lr_scheduler=None,
         lr_scheduler=scheduler_type,
         **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
-    
+
+    # saving models during training
     checkpoint_callback = ModelCheckpoint(
         #monitor='epoch',
         #mode='max',
@@ -166,7 +177,7 @@ if __name__ == '__main__':
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/calpit/rubin_dp1/scripts",
+        default_root_dir="/global/homes/a/ashodkh/calpit/scripts",
         strategy='ddp',
         logger=tb_logger,
         enable_progress_bar=False,

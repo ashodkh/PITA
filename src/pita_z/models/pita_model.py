@@ -12,7 +12,7 @@ class PITALightning(pl.LightningModule):
     """
     PITA Pytorch Lightning Module.
 
-    Args:
+    Attributes:
         encoder (nn.Module): A CNN encoder.
         encoder_mlp (nn.Module, optional): An optional MLP that projects encoder outputs to a lower dimension.
         projection_head (nn.Module): An MLP that projects encoder outputs (or encoder_mlp outputs)
@@ -357,7 +357,7 @@ class CalPITALightning(pl.LightningModule):
     """
     CalPITA Pytorch Lightning Module.
 
-    Args:
+    Attributes:
         encoder (nn.Module): A CNN encoder.
         encoder_mlp (nn.Module, optional): An optional MLP that projects encoder outputs to a lower dimension.
         projection_head (nn.Module): An MLP that projects encoder outputs (or encoder_mlp outputs)
@@ -470,7 +470,11 @@ class CalPITALightning(pl.LightningModule):
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
     
     def forward(self, x, use_momentum_encoder=False, goal='train'):
-        """Forward pass through the encoder and MLPs. If goal is 'train', then a random alpha is generated and concatenated to the latent vector. If goal is to 'validate', then alpha_grid is concatenated to the latent vector. """
+        """
+        Forward pass through the encoder and MLPs.
+        If goal is 'train', then a random alpha is generated and concatenated to the latent vector.
+        If goal is to 'validate', then alpha_grid is concatenated to the latent vector.
+        """
         if use_momentum_encoder:
             x = self.momentum_encoder(x)
             if self.momentum_encoder_mlp:
@@ -565,13 +569,15 @@ class CalPITALightning(pl.LightningModule):
         )
         cdf_new = self.redshift_mlp(features.float()).reshape((x.shape[0], len(self.y_grid))).detach().cpu()
         
-        #cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
-        #pdf_func = cdf_new_funct.derivative(1)
-        #cde_new = pdf_func(self.y_grid.detach().cpu())
+        cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
+        pdf_func = cdf_new_funct.derivative(1)
+        cde_new = pdf_func(self.y_grid.detach().cpu())
 
-        cdf_regressor = IsotonicRegression()
-        cdf_new_mono = np.stack([cdf_regressor.fit_transform(self.y_grid.detach().cpu(), cdf) for cdf in cdf_new])
-        cde_new = np.gradient(cdf_new_mono, self.y_grid.detach().cpu(), axis=1)
+        ## Isotonic regression ensures that interpolation is monotonic
+        ## not needed if using a monotonic NN
+        # cdf_regressor = IsotonicRegression()
+        # cdf_new_mono = np.stack([cdf_regressor.fit_transform(self.y_grid.detach().cpu(), cdf) for cdf in cdf_new])
+        # cde_new = np.gradient(cdf_new_mono, self.y_grid.detach().cpu(), axis=1)
         
         return torch.tensor(cde_new, device=x.device)
     
@@ -609,7 +615,7 @@ class CalPITALightning(pl.LightningModule):
 
     def redshift_metrics(self, batch_images, true_redshifts):
         """
-        Calculates photo-z performance metrics by using the redshift mode.
+        Calculates photo-z performance metrics using the redshift mode.
         """
 
         batch_cdes = self.transform_cde(batch_images)
@@ -630,7 +636,10 @@ class CalPITALightning(pl.LightningModule):
         view_2 = self.transforms(batch_images)
         
         # Forward pass for query (main encoder) and key (momentum encoder)
-        queries, w_alphas, color_predictions, alphas = self.forward(view_1, goal='train') # Queries, redshifts, and colors from main encoder
+        # alphas (PITs) are concatenated to the latent vectors.
+        # To do so, they are generated randomly in the forward function (if goal='Train').
+        # forward function also returns these random alphas to calculate true W (binary PIT variable) and loss.
+        queries, w_alphas, color_predictions, alphas = self.forward(view_1, goal='train') 
         with torch.no_grad():  # No gradients for momentum encoder
             keys, _, _, _ = self.forward(view_2, use_momentum_encoder=True, goal='train')  # Keys from momentum encoder
 
@@ -650,6 +659,7 @@ class CalPITALightning(pl.LightningModule):
             y = (batch_pits <= alphas).float()
             good_redshifts_mask = batch_redshift_weights == 1
             if good_redshifts_mask.sum() == 0:
+                # dummy loss makes sure backprop works properly if there are no redshifts
                 dummy_loss = 0 * self.redshift_loss_fn(w_alphas[:1], torch.squeeze(y)[:1])
                 total_loss += dummy_loss
                 redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
@@ -686,7 +696,9 @@ class CalPITALightning(pl.LightningModule):
         view_2 = self.transforms(batch_images)
         
         # Forward pass for query (main encoder) and key (momentum encoder)
-        queries, w_alphas, color_predictions, _ = self.forward(view_1, goal='validate') # Queries, redshifts, and colors from main encoder
+        # Validation is done on the whole range [0,1] of PIT.
+        # So they don't need to be generated in the forward function (goal='validate').
+        queries, w_alphas, color_predictions, _ = self.forward(view_1, goal='validate')
         with torch.no_grad():  # No gradients for momentum encoder
             keys, _, _, _ = self.forward(view_2, use_momentum_encoder=True, goal='validate')  # Keys from momentum encoder
         
