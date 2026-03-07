@@ -81,10 +81,10 @@ if __name__ == '__main__':
     encoder = models.convnext_tiny(weights=None)
     encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 96, kernel_size=(4,4), stride=(4,4))
 
-    encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512,latent_d])
-    projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128,projection_d])
-    redshift_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['redshift_mlp_hidden_layers'])
-    color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'])    
+    encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
+    projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128], output_dim=projection_d)
+    redshift_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['redshift_mlp_hidden_layers'], output_dim=1)
+    color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'], output_dim=config['data']['n_filters'])    
 
     simclrmoco_model = pita_model.PITALightning(
         encoder=encoder,

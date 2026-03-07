@@ -5,6 +5,7 @@ import h5py
 import numpy as np
 from joblib import load
 from pathlib import Path
+import calpit
 
 class ImagesDataset(torch.utils.data.Dataset):
     """
@@ -158,15 +159,28 @@ class CalpitPhotometryDataset(torch.utils.data.Dataset):
 
     Attributes:
         path_file (str): Path to h5py file.
+        init_cde_path (str): Path to h5py file where initial CDEs are stored.
+        init_cde_type (str): Type of initial CDE. Default is uniform.
         feature_name (str): Column name of features in the dataset.
-        pit (np.array): PIT values of the outputs.
+        y_grid (np.array): Y grid on which CDEs are calculated.
         scaler_path (str): Path to scikit-learn StandardScaler for rescaling the features.
     """
-    def __init__(self, path_file=None, feature_name=None, pit=None, scaler_path=None):
+    def __init__(
+        self,
+        path_file=None,
+        init_cde_path=None,
+        init_cde_type='uniform',
+        feature_name=None,
+        y_grid=None,
+        scaler_path=None,
+    ):
         if Path(path_file).suffix == '.hdf5':
             self.file = h5py.File(path_file, 'r')
+        if init_cde_path:
+            self.cde_file = h5py.File(init_cde_path, 'r')
+        self.init_cde_type = init_cde_type
         self.feature_name = feature_name
-        self.pit = pit
+        self.y_grid = y_grid
         self.scaler = load(scaler_path) if scaler_path else None
 
     def __len__(self):
@@ -175,12 +189,23 @@ class CalpitPhotometryDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         x = self.file[self.feature_name][idx].astype(np.float32)
+        redshift = self.file['redshifts'][idx].astype(np.float32)
+        if self.init_cde_type == 'uniform':
+            cde = np.ones(len(self.y_grid)) / (self.y_grid[-1] - self.y_grid[0])
+        else:
+            cde = self.cde_file['cde'][idx].astype(np.float32)
+        # this pit is used to calculate the loss function (typical y or output)
+        pit = calpit.metrics.probability_integral_transform(
+            cde.reshape(1,-1),
+            self.y_grid,
+            redshift
+        ).squeeze()
         if self.scaler:
             x = self.scaler.transform(x.reshape(1,-1))
         #x = torch.tensor(x.squeeze())
         #y = torch.tensor(self.pit[idx])
-        
-        return x.squeeze(), self.pit[idx], self.file['redshifts'][idx].astype(np.float32)
+
+        return x.squeeze(), pit, redshift, cde
     
 class CalpitPhotometryDataModule(pl.LightningDataModule):
     """
@@ -199,36 +224,44 @@ class CalpitPhotometryDataModule(pl.LightningDataModule):
     def __init__(
         self,
         path_train: str=None,
-        feature_name: str=None,
-        pit_train=None,
-        scaler_path: str=None,
         path_val: str=None,
-        pit_val=None,
+        init_cde_path_train: str=None,
+        init_cde_path_val: str=None,
+        init_cde_type: str='uniform',
+        feature_name: str=None,
+        scaler_path: str=None,
         batch_size: int=None,
-        num_workers: int=None
+        num_workers: int=None,
+        y_grid=None
     ):
         super().__init__()
         self.path_train = path_train
-        self.feature_name = feature_name
-        self.pit_train = pit_train
-        self.scaler_path = scaler_path
         self.path_val = path_val
-        self.pit_val = pit_val
+        self.init_cde_path_train = init_cde_path_train
+        self.init_cde_path_val = init_cde_path_val
+        self.init_cde_type = init_cde_type
+        self.feature_name = feature_name
+        self.scaler_path = scaler_path
         self.batch_size = batch_size
         self.num_workers = num_workers
+        self.y_grid = y_grid
 
     def setup(self, stage):
         self.ds_train = CalpitPhotometryDataset(
             path_file=self.path_train,
+            init_cde_path=self.init_cde_path_train,
+            init_cde_type=self.init_cde_type,
             feature_name=self.feature_name,
-            pit=self.pit_train,
+            y_grid=self.y_grid,
             scaler_path=self.scaler_path
         )
 
         self.ds_val = CalpitPhotometryDataset(
             path_file=self.path_val,
+            init_cde_path=self.init_cde_path_val,
+            init_cde_type=self.init_cde_type,
             feature_name=self.feature_name,
-            pit=self.pit_val,
+            y_grid=self.y_grid,
             scaler_path=self.scaler_path
         )
 

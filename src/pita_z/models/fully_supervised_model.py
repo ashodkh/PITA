@@ -260,8 +260,6 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self.loss_type = loss_type
         self.register_buffer("alpha_grid", torch.as_tensor(alpha_grid, dtype=torch.float32))
         self.register_buffer("y_grid", torch.as_tensor(y_grid, dtype=torch.float32))
-        if cde_init_type == 'uniform':
-            self.register_buffer("cde_init", torch.full((len(y_grid),), 1/(y_grid[-1]-y_grid[0]), dtype=torch.float32))
         self.lr = lr
         self.lr_scheduler = lr_scheduler
         self.cosine_T_max = cosine_T_max
@@ -278,12 +276,11 @@ class CalpitPhotometryLightning(pl.LightningModule):
     def forward(self, x):
         return self.model(x)
 
-    def transform(self, x):
+    def transform(self, x, cde_init):
         """
         Transforms the initial CDE guesses to the calibrated CDEs.
         """
         # Making an array of initial CDEs
-        cde_init = torch.tile(self.cde_init, (x.shape[0],1))
         cdf_init = trapz_grid_torch(cde_init, self.y_grid)
         # Initial CDFs are the initial PIT guesses
         features = torch.cat(
@@ -309,20 +306,20 @@ class CalpitPhotometryLightning(pl.LightningModule):
             return loss(predictions, truths)
 
     def training_step(self, batch, batch_idx):
-        x, y, true_redshifts = batch
+        x, y, true_redshifts, init_cdes = batch
         n_batch = x.shape[0]
         alphas = torch.rand(n_batch, device=x.device)
-        x = torch.hstack([alphas[:,None], x])
+        features = torch.hstack([alphas[:,None], x])
         # Calculating the binary variable W. Mean of W is the true PIT.
         y = (y <= alphas).float()
 
-        outputs = self.model(x)
+        outputs = self.model(features)
         
         loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
         self.log("training_loss", loss, on_epoch=True, sync_dist=True)
 
         # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
-        batch_cdes = self.transform(x[:,1:])
+        batch_cdes = self.transform(x, init_cdes)
         max_idxs = torch.argmax(batch_cdes, axis=1)
         max_ys = self.y_grid[max_idxs]
         
@@ -338,7 +335,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         return loss
         
     def validation_step(self, batch, batch_idx):
-        x, y, true_redshifts = batch
+        x, y, true_redshifts, init_cdes = batch
         x_device = x.device
         n_batch = x.shape[0]
         n_alphas = len(self.alpha_grid)
@@ -358,7 +355,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
 
         # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
-        batch_cdes = self.transform(x)
+        batch_cdes = self.transform(x, init_cdes)
         max_idxs = torch.argmax(batch_cdes, axis=1)
         max_ys = self.y_grid[max_idxs]
         

@@ -28,49 +28,23 @@ if __name__ == '__main__':
     path_train = config['data']['path_train']
     path_val = config['data']['path_val']
 
+    # defining a grid of redshifts
     z_min = config['initial_cde']['z_min']
     z_max = config['initial_cde']['z_max']
-
-    with h5py.File(path_train, 'r') as f_train:
-        y_train = f_train['redshifts'][:].astype('float32').clip(z_min,z_max)
-    with h5py.File(path_val, 'r') as f_val:
-        y_val = f_val['redshifts'][:].astype('float32').clip(z_min,z_max)
-
-    # defining a grid of redshifts and calculating initial cde guess
-    initial_cde_type = config['initial_cde']['type']
-    if initial_cde_type == 'uniform':
-        n_grid = config['initial_cde']['n_grid']
-        z_grid = np.linspace(z_min, z_max, n_grid, dtype='float32')
-        d_z = z_grid[1] - z_grid[0]
-
-        cde_train = np.zeros((y_train.shape[0],n_grid), dtype='float32')
-        cde_train[:,:] = 1 / (z_max - z_min)
-
-        cde_val = np.zeros((y_val.shape[0],n_grid), dtype='float32')
-        cde_val[:,:] = 1 / (z_max - z_min)
-
-    # these pits are used to calculate the loss function (typical y or output)
-    pit_train = calpit.metrics.probability_integral_transform(
-        cde_train,
-        z_grid,
-        y_train
-    )
-
-    pit_val = calpit.metrics.probability_integral_transform(
-        cde_val,
-        z_grid,
-        y_val
-    )
-    
+    n_grid = config['initial_cde']['n_grid']
+    z_grid = np.linspace(z_min, z_max, n_grid, dtype='float32')
+    init_cde_type = config['initial_cde']['type']
     data_module = data_modules.CalpitPhotometryDataModule(
         path_train=path_train,
-        feature_name=config['data']['feature_name'],
-        pit_train=pit_train,
-        scaler_path=None,
         path_val=path_val,
-        pit_val=pit_val,
+        init_cde_path_train=config['initial_cde'][init_cde_type]['init_cde_path_train'],
+        init_cde_path_val=config['initial_cde'][init_cde_type]['init_cde_path_val'],
+        init_cde_type=init_cde_type,
+        feature_name=config['data']['feature_name'],
+        scaler_path=None,
         batch_size=config['data']['batch_size'],
-        num_workers=config['data']['num_workers']
+        num_workers=config['data']['num_workers'],
+        y_grid=z_grid,
     )
      
     ## prepping model
@@ -109,7 +83,6 @@ if __name__ == '__main__':
         model=model,
         alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),
         y_grid=z_grid.astype('float32'),
-        cde_init_type='uniform',
         lr=config['training']['learning_rate'],
         lr_scheduler=scheduler_type,
         **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
