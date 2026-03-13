@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
 import copy
+import random
 from calpit.utils import trapz_grid_torch
 from scipy.interpolate import PchipInterpolator
 from sklearn.isotonic import IsotonicRegression
@@ -641,6 +642,7 @@ class CalPITALightning(pl.LightningModule):
     
     #     return params
 
+    @staticmethod
     def pcgrad_update(grads: list[torch.Tensor]) -> list[torch.Tensor]:
         num_tasks = len(grads)
         modified_grads = [g.clone() for g in grads]
@@ -715,31 +717,55 @@ class CalPITALightning(pl.LightningModule):
 
         self.log("losses/total_training_loss", total_loss, on_epoch=True, sync_dist=True)
 
+        opt = self.optimizers()
+
         shared_params = list(self.encoder.parameters()) + list(self.encoder_mlp.parameters())
         shared_params = [p for p in shared_params if p.requires_grad]
 
+        task_specific_params = [
+            list(self.projection_head.parameters()),
+            list(self.color_mlp.parameters()),
+            list(self.redshift_mlp.parameters()),
+        ]
+
         task_grads_shared = []
+        saved_task_specific_grads = []
         losses = [cl_loss, color_loss, redshift_loss]
-        for loss in losses:
+        grads_norms_pre = []
+        for i, (loss, ts_params) in enumerate(zip(losses, task_specific_params)):
             opt.zero_grad()
-            self.manual_backward(loss, retain_graph=True)
+            self.manual_backward(loss, retain_graph=(i < len(losses) - 1))
             grad = torch.cat([
                 p.grad.flatten() if p.grad is not None else torch.zeros(p.numel(), device=p.device)
                 for p in shared_params
             ])
             task_grads_shared.append(grad)
+            grads_norms_pre.append(torch.norm(grad))
+            saved_task_specific_grads.append([
+                p.grad.clone() if p.grad is not None else torch.zeros_like(p)
+                for p in ts_params
+            ])
 
-        modified_grads = pcgrad_update(task_grads_shared)
-        final_shared_grad = torch.stack(modified_grads).sum(dim=0) # sums task-specific grads to get one grad for total loss
+        modified_grads = self.pcgrad_update(task_grads_shared)
+        for i,loss_name in enumerate(['cl', 'color', 'redshift']):
+            self.log(f'grads/{loss_name}_grad_pre_projection', grads_norms_pre[i], on_epoch=True, sync_dist=True)
+            self.log(f'grads/{loss_name}_grad_post', torch.norm(modified_grads[i]), on_epoch=True, sync_dist=True)
+        final_shared_grad = torch.stack(modified_grads).sum(dim=0)
 
         opt.zero_grad()
+
+        # Set shared param grads to PCGrad result
         offset = 0
         for p in shared_params:
             numel = p.numel()
             p.grad = final_shared_grad[offset: offset + numel].view_as(p).clone()
             offset += numel
 
-        self.manual_backward(total_loss)
+        # Restore task-specific param grads saved from individual backward passes
+        for ts_params, grads in zip(task_specific_params, saved_task_specific_grads):
+            for p, g in zip(ts_params, grads):
+                p.grad = g
+
         opt.step()
         
         return total_loss.detach()
@@ -761,8 +787,8 @@ class CalPITALightning(pl.LightningModule):
         # Compute and log the contrastive loss
         pos_sim, cl_loss = self.contrastive_loss(queries, keys)
         cl_loss = cl_loss * self.cl_loss_weight
-        self.log("cl_validation_loss", cl_loss, on_epoch=True, sync_dist=True)
-        self.log("validation_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
+        self.log("losses/cl_validation_loss", cl_loss, on_epoch=True, sync_dist=True)
+        self.log("losses/validation_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
 
         total_loss = cl_loss
 
@@ -786,19 +812,19 @@ class CalPITALightning(pl.LightningModule):
                     batch_redshifts[good_redshifts_mask]
                 )
                 
-            self.log("redshift_val_loss", redshift_loss, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('val_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('val_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('val_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
+            self.log("losses/redshift_val_loss", redshift_loss, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('metrics/val_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('metrics/val_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('metrics/val_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
             
         if self.color_mlp is not None:
             color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
             color_loss = color_loss * self.color_loss_weight
-            self.log("color_validation_loss", color_loss, on_epoch=True, sync_dist=True)
+            self.log("losses/color_validation_loss", color_loss, on_epoch=True, sync_dist=True)
 
             total_loss += color_loss
         
-        self.log("total_validation_loss", total_loss, on_epoch=True, sync_dist=True)
+        self.log("losses/total_validation_loss", total_loss, on_epoch=True, sync_dist=True)
         
         return total_loss
 
