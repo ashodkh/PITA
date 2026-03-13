@@ -1,5 +1,6 @@
 import pytorch_lightning as pl
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
 import copy
@@ -7,7 +8,6 @@ from calpit.utils import trapz_grid_torch
 from scipy.interpolate import PchipInterpolator
 from sklearn.isotonic import IsotonicRegression
 import numpy as np
-from lightning.pytorch.utilities import grad_norm
 
 class PITALightning(pl.LightningModule):
     """
@@ -399,6 +399,7 @@ class CalPITALightning(pl.LightningModule):
         cl_loss_weight=0.0025,
         redshift_loss_weight=1,
         color_loss_weight=1,
+        gradnorm_alpha=1,
         lr=None,
         lr_scheduler=None,
 
@@ -435,9 +436,7 @@ class CalPITALightning(pl.LightningModule):
         self.transforms_z_metric = transforms_z_metric
         self.momentum = momentum
         self.temperature = temperature
-        self.cl_loss_weight = cl_loss_weight
-        self.redshift_loss_weight = redshift_loss_weight
-        self.color_loss_weight = color_loss_weight
+        self.gradnorm_alpha = gradnorm_alpha
         self.lr = lr
         self.lr_scheduler = lr_scheduler
         self.cosine_T_max = cosine_T_max
@@ -450,6 +449,11 @@ class CalPITALightning(pl.LightningModule):
         self.wc_ann_warmup_epochs = wc_ann_warmup_epochs
         self.wc_ann_half_period = wc_ann_half_period
         self.wc_ann_min_lr = wc_ann_min_lr
+
+        # Initialize loss weights
+        self.cl_loss_weight = nn.Parameter(torch.tensor(1.0))
+        self.redshift_loss_weight = nn.Parameter(torch.tensor(1.0))
+        self.color_loss_weight = nn.Parameter(torch.tensor(1.0))
         
         # Initialize the momentum (key) encoder and its heads as copies of the original
         self.momentum_encoder = copy.deepcopy(self.encoder)
@@ -467,12 +471,14 @@ class CalPITALightning(pl.LightningModule):
         
         # Initialize the queue for negative samples
         self.register_buffer("queue", torch.randn(queue_size, projection_head.output_dim))
-        self.queue = F.normalize(self.queue, dim=1) 
+        self.queue = F.normalize(self.queue, dim=1)
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
-        # disable automatic optimization to track gradients individually
-        #self.automatic_optimization = False
-    
+        # GradNorm: manual optimization and initial-loss tracking
+        self.automatic_optimization = False
+        self.register_buffer("initial_losses", torch.zeros(3))
+        self.register_buffer("initial_losses_initialized", torch.tensor(False))
+
     def forward(self, x, use_momentum_encoder=False, goal='train'):
         """
         Forward pass through the encoder and MLPs.
@@ -617,6 +623,15 @@ class CalPITALightning(pl.LightningModule):
         loss = torch.nn.HuberLoss(delta=delta)
         return loss(predictions, truths)
 
+    def _get_last_shared_layer_params(self):
+        """Returns the parameters of the last layer of encoder_mlp for GradNorm."""
+        last_params = None
+        for module in self.encoder_mlp.modules():
+            params = list(module.parameters(recurse=False))
+            if params:
+                last_params = params
+        return last_params
+
     def redshift_metrics(self, batch_images, true_redshifts):
         """
         Calculates photo-z performance metrics using the redshift mode.
@@ -632,90 +647,136 @@ class CalPITALightning(pl.LightningModule):
         outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(true_redshifts)
 
         return bias, nmad, outlier_fraction
-
-    
-    def _get_last_shared_layer_params(self):
-        """Returns the parameters of the last layer of encoder_mlp for GradNorm."""
-        if self.encoder_mlp is None:
-            return None
-        last_params = None
-        for module in self.encoder_mlp.modules():
-            params = list(module.parameters(recurse=False))
-            if params:
-                last_params = params
-        return last_params
-        
+            
     def training_step(self, batch_data, batch_idx):
+        opt_main, opt_weights = self.optimizers()
+
         batch_images, batch_pits, batch_redshifts, batch_redshift_weights, batch_colors = batch_data
+        device = batch_images.device
+
         # Apply transformations to create two augmented views
         view_1 = self.transforms(batch_images)
         view_2 = self.transforms(batch_images)
-        
-        # Forward pass for query (main encoder) and key (momentum encoder)
-        # alphas (PITs) are concatenated to the latent vectors.
-        # To do so, they are generated randomly in the forward function (if goal='Train').
-        # forward function also returns these random alphas to calculate true W (binary PIT variable) and loss.
-        queries, w_alphas, color_predictions, alphas = self.forward(view_1, goal='train') 
-        with torch.no_grad():  # No gradients for momentum encoder
-            keys, _, _, _ = self.forward(view_2, use_momentum_encoder=True, goal='train')  # Keys from momentum encoder
 
-        # Update the momentum encoder and enqueue the keys
+        # Forward pass for query (main encoder) and key (momentum encoder)
+        queries, w_alphas, color_predictions, alphas = self.forward(view_1, goal='train')
+        with torch.no_grad():
+            keys, _, _, _ = self.forward(view_2, use_momentum_encoder=True, goal='train')
+
         self.update_momentum_encoder()
         self.dequeue_and_enqueue(keys)
-        
-        # Compute and log the contrastive loss
-        pos_sim, cl_loss = self.contrastive_loss(queries, keys)
-        cl_loss = cl_loss * self.cl_loss_weight
-        
-        self.log("losses/cl_training_loss", cl_loss, on_epoch=True, sync_dist=True)
-        self.log("losses/training_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
 
-        total_loss = cl_loss
+        # ── Compute raw (unweighted) task losses ──────────────────────────────
+        pos_sim, cl_loss_raw = self.contrastive_loss(queries, keys)
+
+        bias, nmad, outlier_fraction = 0, 0, 0
         if self.redshift_mlp:
             y = (batch_pits <= alphas).float()
             good_redshifts_mask = batch_redshift_weights == 1
             if good_redshifts_mask.sum() == 0:
-                # dummy loss makes sure backprop works properly if there are no redshifts
-                dummy_loss = 0 * self.redshift_loss_fn(w_alphas[:1], torch.squeeze(y)[:1])
-                total_loss += dummy_loss
-                redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
+                redshift_loss_raw = 0 * self.redshift_loss_fn(w_alphas[:1], torch.squeeze(y)[:1])
             else:
-                redshift_loss = self.redshift_loss_fn(w_alphas[good_redshifts_mask], torch.squeeze(y)[good_redshifts_mask])
-                redshift_loss = redshift_loss * self.redshift_loss_weight
-                total_loss += redshift_loss 
-                bias, nmad, outlier_fraction\
-                = self.redshift_metrics(
+                redshift_loss_raw = self.redshift_loss_fn(
+                    w_alphas[good_redshifts_mask], torch.squeeze(y)[good_redshifts_mask]
+                )
+                bias, nmad, outlier_fraction = self.redshift_metrics(
                     self.transforms_z_metric(batch_images[good_redshifts_mask]),
                     batch_redshifts[good_redshifts_mask]
                 )
-                
-            self.log("losses/redshift_training_loss", redshift_loss, on_epoch=True, sync_dist=True)  
-            self.log('metrics/training_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('metrics/training_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('metrics/training_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
-            
+        else:
+            redshift_loss_raw = torch.zeros(1, device=device).squeeze()
+
         if self.color_mlp:
-            color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
-            color_loss = color_loss * self.color_loss_weight
-            self.log("losses/color_training_loss", color_loss, on_epoch=True, sync_dist=True)
-            total_loss += color_loss
+            color_loss_raw = self.weighted_mse_loss(color_predictions, batch_colors)
+        else:
+            color_loss_raw = torch.zeros(1, device=device).squeeze()
 
-        self.log("losses/total_training_loss", total_loss, on_epoch=True, sync_dist=True)
+        task_losses = [cl_loss_raw, redshift_loss_raw, color_loss_raw]
+        task_weights = [self.cl_loss_weight, self.redshift_loss_weight, self.color_loss_weight]
 
-        losses = {'cl': cl_loss, 'redshift': redshift_loss, 'color': color_loss}
+        # ── GradNorm: record initial losses on the very first step ───────────
+        if not self.initial_losses_initialized.item():
+            self.initial_losses = torch.stack([l.detach() for l in task_losses])
+            self.initial_losses_initialized.fill_(True)
+
+        # ── GradNorm: compute per-task gradient norms w.r.t. last shared layer
+        # Must happen before the main backward so the graph is still alive.
         shared_params = self._get_last_shared_layer_params()
-        for key in losses:
-            grads = torch.autograd.grad(
-                losses[key],
-                shared_params,
-                retain_graph=True, create_graph=False, allow_unused=True
-            )
-            grads = [g if g is not None else torch.zeros_like(p)
-                     for g, p in zip(grads, shared_params)]
-            g_norm = torch.norm(torch.stack([g.norm() for g in grads]))
-            self.log(f"grads/{key}_grad", g_norm, on_epoch=True, sync_dist=True)
+        raw_grad_norms = []
+        for loss in task_losses:
+            if loss.requires_grad:
+                grads = torch.autograd.grad(
+                    loss, shared_params,
+                    retain_graph=True, create_graph=False, allow_unused=True
+                )
+                grads = [g if g is not None else torch.zeros_like(p)
+                         for g, p in zip(grads, shared_params)]
+                g_norm = torch.norm(torch.stack([g.norm() for g in grads]))
+            else:
+                g_norm = torch.zeros(1, device=device).squeeze()
+            raw_grad_norms.append(g_norm.detach())
+
+        # ── Step 1: update main network parameters ───────────────────────────
+        total_loss = sum(w * l for w, l in zip(task_weights, task_losses))
+        opt_main.zero_grad()
+        self.manual_backward(total_loss)
+        opt_main.step()
+
+        # ── Step 2: GradNorm update for task weights ──────────────────────────
+        # G_W^i = |w_i| * ||∇_W L_i||  (||∇_W L_i|| treated as constant)
+        G_W = torch.stack([w.abs() * g for w, g in zip(task_weights, raw_grad_norms)])
+
+        # Relative inverse training rate  r_i = (L_i / L_i^0) / mean(L_j / L_j^0)
+        current_losses = torch.stack([l.detach() for l in task_losses])
+        loss_ratios = current_losses / (self.initial_losses + 1e-8)
+        r_i = loss_ratios / (loss_ratios.mean() + 1e-8)
+
+        # Target gradient norm (G_bar is treated as a constant — no gradient)
+        G_bar = (G_W.detach().mean() * r_i ** self.gradnorm_alpha).detach()
+
+        L_gradnorm = torch.sum(torch.abs(G_W - G_bar))
+        opt_weights.zero_grad()
+        self.manual_backward(L_gradnorm)
+        opt_weights.step()
+
+        # ── Step 3: renormalize weights so they sum to n_tasks ────────────────
+        with torch.no_grad():
+            n_tasks = len(task_weights)
+            weight_sum = sum(w.data for w in task_weights)
+            for w in task_weights:
+                w.data.mul_(n_tasks / weight_sum)
+
+        # ── Logging ───────────────────────────────────────────────────────────
+        self.log("losses/cl_training_loss_raw", cl_loss_raw.detach(), on_epoch=True, sync_dist=True)
+        self.log("losses/cl_training_loss_weighted", self.cl_loss_weight.detach() * cl_loss_raw.detach(),
+                 on_epoch=True, sync_dist=True)
+        self.log("losses/training_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
+        self.log("losses/L_gradnorm", L_gradnorm.detach(), on_epoch=True, sync_dist=True)
+        self.log("losses/redshift_training_loss_raw", redshift_loss_raw.detach(),
+                 on_epoch=True, sync_dist=True)
+        self.log("losses/redshift_training_loss_weighted",
+                 redshift_loss_raw.detach() * self.redshift_loss_weight.detach(),
+                 on_epoch=True, sync_dist=True)
+        self.log("losses/color_training_loss_raw", color_loss_raw.detach(),
+                 on_epoch=True, sync_dist=True)
+        self.log("losses/color_training_loss_weighted",
+                 color_loss_raw.detach() * self.color_loss_weight.detach(),
+                 on_epoch=True, sync_dist=True)
+        self.log("losses/total_training_loss", total_loss.detach(), on_epoch=True, sync_dist=True)
+
+        self.log("grads/cl_grad", raw_grad_norms[0], on_epoch=True, sync_dist=True)
+        self.log("grads/redshift_grad", raw_grad_norms[1], on_epoch=True, sync_dist=True)
+        self.log("grads/color_grad", raw_grad_norms[2], on_epoch=True, sync_dist=True)
+
+        self.log("weights/w_cl", self.cl_loss_weight.detach(), on_epoch=True, sync_dist=True)
+        self.log("weights/w_redshift", self.redshift_loss_weight.detach(), on_epoch=True, sync_dist=True)
+        self.log("weights/w_color", self.color_loss_weight.detach(), on_epoch=True, sync_dist=True)
         
-        return total_loss
+        self.log('metrics/training_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
+        self.log('metrics/training_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
+        self.log('metrics/training_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
+
+        return total_loss.detach()
     
     def validation_step(self, batch_data, batch_idx):
         batch_images, batch_pits, batch_redshifts, batch_redshift_weights, batch_colors = batch_data
@@ -733,7 +794,7 @@ class CalPITALightning(pl.LightningModule):
         
         # Compute and log the contrastive loss
         pos_sim, cl_loss = self.contrastive_loss(queries, keys)
-        cl_loss = cl_loss * self.cl_loss_weight
+        cl_loss = cl_loss# * self.cl_loss_weight
         self.log("losses/cl_validation_loss", cl_loss, on_epoch=True, sync_dist=True)
         self.log("losses/validation_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
 
@@ -751,7 +812,7 @@ class CalPITALightning(pl.LightningModule):
                 redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
             else:
                 redshift_loss = self.redshift_loss_fn(w_alphas[good_redshifts_mask_tiled], torch.squeeze(y)[good_redshifts_mask_tiled])
-                redshift_loss = redshift_loss * self.redshift_loss_weight
+                redshift_loss = redshift_loss# * self.redshift_loss_weight
                 total_loss += redshift_loss
                 bias, nmad, outlier_fraction\
                 = self.redshift_metrics(
@@ -766,7 +827,7 @@ class CalPITALightning(pl.LightningModule):
             
         if self.color_mlp is not None:
             color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
-            color_loss = color_loss * self.color_loss_weight
+            color_loss = color_loss# * self.color_loss_weight
             self.log("losses/color_validation_loss", color_loss, on_epoch=True, sync_dist=True)
 
             total_loss += color_loss
@@ -774,37 +835,42 @@ class CalPITALightning(pl.LightningModule):
         self.log("losses/total_validation_loss", total_loss, on_epoch=True, sync_dist=True)
         
         return total_loss
+    
+    def on_train_epoch_end(self):
+        """Manually step the lr scheduler (required with automatic_optimization=False)."""
+        sch = self.lr_schedulers()
+        if sch is not None:
+            if isinstance(sch, list):
+                sch[0].step()
+            else:
+                sch.step()
 
-    # def on_train_epoch_end(self):
-    #     """Manually step the lr scheduler (required with automatic_optimization=False)."""
-    #     sch = self.lr_schedulers()
-    #     if sch is not None:
-    #         if isinstance(sch, list):
-    #             sch[0].step()
-    #         else:
-    #             sch.step()
-                
     def configure_optimizers(self):
-        optim = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-05)
-        #optim = ADOPT(self.parameters(), lr=self.lr, weight_decay=1e-05)
+        # Separate optimizer for GradNorm task-weight parameters
+        gradnorm_params = [self.cl_loss_weight, self.redshift_loss_weight, self.color_loss_weight]
+        gradnorm_ids = {id(p) for p in gradnorm_params}
+        main_params = [p for p in self.parameters() if id(p) not in gradnorm_ids]
+
+        opt_main = torch.optim.Adam(main_params, lr=self.lr, weight_decay=1e-05)
+        opt_weights = torch.optim.Adam(gradnorm_params, lr=self.lr)
 
         if self.lr_scheduler == 'multistep':
             lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
-                optimizer=optim,
+                optimizer=opt_main,
                 milestones=self.multistep_milestones,
                 gamma=self.multistep_gamma
             )
-            
+
         if self.lr_scheduler == 'cosine':
             lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                optimizer=optim,
+                optimizer=opt_main,
                 T_max=self.cosine_T_max,
                 eta_min=self.cosine_eta_min
             )
 
         if self.lr_scheduler == 'warmupcosine':
             lr_scheduler = WarmupCosine(
-                optimizer=optim,
+                optimizer=opt_main,
                 warmup_epochs=self.warmupcosine_warmup_epochs,
                 cos_half_period=self.warmupcosine_half_period,
                 min_lr=self.warmupcosine_min_lr
@@ -812,15 +878,13 @@ class CalPITALightning(pl.LightningModule):
 
         if self.lr_scheduler == 'wc_ann':
             lr_scheduler = WarmupCosineAnnealingScheduler(
-                optimizer=optim,
+                optimizer=opt_main,
                 warmup_epochs=self.wc_ann_warmup_epochs,
                 cos_half_period=self.wc_ann_half_period,
                 min_lr=self.wc_ann_min_lr
             )
-            
+
         if self.lr_scheduler is None:
-            return optim
+            return [opt_main, opt_weights]
         else:
-            return [optim], [lr_scheduler]
-            
-        
+            return [opt_main, opt_weights], [lr_scheduler]

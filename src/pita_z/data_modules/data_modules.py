@@ -192,14 +192,11 @@ class CalpitPhotometryDataset(torch.utils.data.Dataset):
         redshift = self.file['redshifts'][idx].astype(np.float32)
         if self.init_cde_type == 'uniform':
             cde = np.ones(len(self.y_grid)) / (self.y_grid[-1] - self.y_grid[0])
+            pit = (1 / (self.y_grid[-1] - self.y_grid[0]) * redshift).clip(0,1)
         else:
             cde = self.cde_file['cde'][idx].astype(np.float32)
-        # this pit is used to calculate the loss function (typical y or output)
-        pit = calpit.metrics.probability_integral_transform(
-            cde.reshape(1,-1),
-            self.y_grid,
-            redshift
-        ).squeeze()
+            # this pit is used to calculate the loss function (typical y or output)
+            pit = self.cde_file['pit'][idx].astype(np.float32)
         if self.scaler:
             x = self.scaler.transform(x.reshape(1,-1))
         #x = torch.tensor(x.squeeze())

@@ -7,7 +7,6 @@ from calpit.utils import trapz_grid_torch
 from scipy.interpolate import PchipInterpolator
 from sklearn.isotonic import IsotonicRegression
 import numpy as np
-from lightning.pytorch.utilities import grad_norm
 
 class PITALightning(pl.LightningModule):
     """
@@ -469,9 +468,6 @@ class CalPITALightning(pl.LightningModule):
         self.register_buffer("queue", torch.randn(queue_size, projection_head.output_dim))
         self.queue = F.normalize(self.queue, dim=1) 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
-
-        # disable automatic optimization to track gradients individually
-        #self.automatic_optimization = False
     
     def forward(self, x, use_momentum_encoder=False, goal='train'):
         """
@@ -632,19 +628,7 @@ class CalPITALightning(pl.LightningModule):
         outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(true_redshifts)
 
         return bias, nmad, outlier_fraction
-
-    
-    def _get_last_shared_layer_params(self):
-        """Returns the parameters of the last layer of encoder_mlp for GradNorm."""
-        if self.encoder_mlp is None:
-            return None
-        last_params = None
-        for module in self.encoder_mlp.modules():
-            params = list(module.parameters(recurse=False))
-            if params:
-                last_params = params
-        return last_params
-        
+            
     def training_step(self, batch_data, batch_idx):
         batch_images, batch_pits, batch_redshifts, batch_redshift_weights, batch_colors = batch_data
         # Apply transformations to create two augmented views
@@ -667,8 +651,8 @@ class CalPITALightning(pl.LightningModule):
         pos_sim, cl_loss = self.contrastive_loss(queries, keys)
         cl_loss = cl_loss * self.cl_loss_weight
         
-        self.log("losses/cl_training_loss", cl_loss, on_epoch=True, sync_dist=True)
-        self.log("losses/training_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
+        self.log("cl_training_loss", cl_loss, on_epoch=True, sync_dist=True)
+        self.log("training_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
 
         total_loss = cl_loss
         if self.redshift_mlp:
@@ -689,32 +673,19 @@ class CalPITALightning(pl.LightningModule):
                     batch_redshifts[good_redshifts_mask]
                 )
                 
-            self.log("losses/redshift_training_loss", redshift_loss, on_epoch=True, sync_dist=True)  
-            self.log('metrics/training_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('metrics/training_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('metrics/training_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
+            self.log("redshift_training_loss", redshift_loss, on_epoch=True, sync_dist=True)  
+            self.log('training_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('training_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('training_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
             
         if self.color_mlp:
             color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
             color_loss = color_loss * self.color_loss_weight
-            self.log("losses/color_training_loss", color_loss, on_epoch=True, sync_dist=True)
+            self.log("color_training_loss", color_loss, on_epoch=True, sync_dist=True)
             total_loss += color_loss
 
-        self.log("losses/total_training_loss", total_loss, on_epoch=True, sync_dist=True)
+        self.log("total_training_loss", total_loss, on_epoch=True, sync_dist=True)
 
-        losses = {'cl': cl_loss, 'redshift': redshift_loss, 'color': color_loss}
-        shared_params = self._get_last_shared_layer_params()
-        for key in losses:
-            grads = torch.autograd.grad(
-                losses[key],
-                shared_params,
-                retain_graph=True, create_graph=False, allow_unused=True
-            )
-            grads = [g if g is not None else torch.zeros_like(p)
-                     for g, p in zip(grads, shared_params)]
-            g_norm = torch.norm(torch.stack([g.norm() for g in grads]))
-            self.log(f"grads/{key}_grad", g_norm, on_epoch=True, sync_dist=True)
-        
         return total_loss
     
     def validation_step(self, batch_data, batch_idx):
@@ -734,8 +705,8 @@ class CalPITALightning(pl.LightningModule):
         # Compute and log the contrastive loss
         pos_sim, cl_loss = self.contrastive_loss(queries, keys)
         cl_loss = cl_loss * self.cl_loss_weight
-        self.log("losses/cl_validation_loss", cl_loss, on_epoch=True, sync_dist=True)
-        self.log("losses/validation_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
+        self.log("cl_validation_loss", cl_loss, on_epoch=True, sync_dist=True)
+        self.log("validation_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
 
         total_loss = cl_loss
 
@@ -759,31 +730,22 @@ class CalPITALightning(pl.LightningModule):
                     batch_redshifts[good_redshifts_mask]
                 )
                 
-            self.log("losses/redshift_val_loss", redshift_loss, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('metrics/val_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('metrics/val_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('metrics/val_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
+            self.log("redshift_val_loss", redshift_loss, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('val_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('val_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('val_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
             
         if self.color_mlp is not None:
             color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
             color_loss = color_loss * self.color_loss_weight
-            self.log("losses/color_validation_loss", color_loss, on_epoch=True, sync_dist=True)
+            self.log("color_validation_loss", color_loss, on_epoch=True, sync_dist=True)
 
             total_loss += color_loss
         
-        self.log("losses/total_validation_loss", total_loss, on_epoch=True, sync_dist=True)
+        self.log("total_validation_loss", total_loss, on_epoch=True, sync_dist=True)
         
         return total_loss
-
-    # def on_train_epoch_end(self):
-    #     """Manually step the lr scheduler (required with automatic_optimization=False)."""
-    #     sch = self.lr_schedulers()
-    #     if sch is not None:
-    #         if isinstance(sch, list):
-    #             sch[0].step()
-    #         else:
-    #             sch.step()
-                
+    
     def configure_optimizers(self):
         optim = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-05)
         #optim = ADOPT(self.parameters(), lr=self.lr, weight_decay=1e-05)
