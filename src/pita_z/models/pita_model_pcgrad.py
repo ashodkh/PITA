@@ -468,6 +468,8 @@ class CalPITALightning(pl.LightningModule):
         self.register_buffer("queue", torch.randn(queue_size, projection_head.output_dim))
         self.queue = F.normalize(self.queue, dim=1) 
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
+
+        self.automatic_optimization = False
     
     def forward(self, x, use_momentum_encoder=False, goal='train'):
         """
@@ -628,7 +630,34 @@ class CalPITALightning(pl.LightningModule):
         outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(true_redshifts)
 
         return bias, nmad, outlier_fraction
-            
+
+    # def _get_shared_layer_params(self):
+    #     """Returns the parameters shared by the three tasks."""
+    #     params = []
+    #     for module in self.encoder.modules():
+    #         params.extend(module.parameters(recurse=False))
+    #     for module in self.encoder_mlp.modules():
+    #         params.extend(module.parameters(recurse=False))
+    
+    #     return params
+
+    def pcgrad_update(grads: list[torch.Tensor]) -> list[torch.Tensor]:
+        num_tasks = len(grads)
+        modified_grads = [g.clone() for g in grads]
+    
+        for i in range(num_tasks):
+            task_indices = list(range(num_tasks))
+            task_indices.remove(i)
+            random.shuffle(task_indices)  # ← shuffle the order of other tasks
+    
+            for j in task_indices:
+                gi, gj = modified_grads[i], grads[j]
+                dot = torch.dot(gi, gj)
+                if dot < 0:
+                    modified_grads[i] = gi - (dot / (gj.norm() ** 2 + 1e-8)) * gj
+    
+        return modified_grads
+    
     def training_step(self, batch_data, batch_idx):
         batch_images, batch_pits, batch_redshifts, batch_redshift_weights, batch_colors = batch_data
         # Apply transformations to create two augmented views
@@ -651,8 +680,8 @@ class CalPITALightning(pl.LightningModule):
         pos_sim, cl_loss = self.contrastive_loss(queries, keys)
         cl_loss = cl_loss * self.cl_loss_weight
         
-        self.log("cl_training_loss", cl_loss, on_epoch=True, sync_dist=True)
-        self.log("training_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
+        self.log("losses/cl_training_loss", cl_loss, on_epoch=True, sync_dist=True)
+        self.log("losses/training_pos_sim", pos_sim, on_epoch=True, sync_dist=True)
 
         total_loss = cl_loss
         if self.redshift_mlp:
@@ -673,20 +702,47 @@ class CalPITALightning(pl.LightningModule):
                     batch_redshifts[good_redshifts_mask]
                 )
                 
-            self.log("redshift_training_loss", redshift_loss, on_epoch=True, sync_dist=True)  
-            self.log('training_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('training_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
-            self.log('training_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
+            self.log("losses/redshift_training_loss", redshift_loss, on_epoch=True, sync_dist=True)  
+            self.log('metrics/training_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('metrics/training_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
+            self.log('metrics/training_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
             
         if self.color_mlp:
             color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
             color_loss = color_loss * self.color_loss_weight
-            self.log("color_training_loss", color_loss, on_epoch=True, sync_dist=True)
+            self.log("losses/color_training_loss", color_loss, on_epoch=True, sync_dist=True)
             total_loss += color_loss
 
-        self.log("total_training_loss", total_loss, on_epoch=True, sync_dist=True)
+        self.log("losses/total_training_loss", total_loss, on_epoch=True, sync_dist=True)
 
-        return total_loss
+        shared_params = list(self.encoder.parameters()) + list(self.encoder_mlp.parameters())
+        shared_params = [p for p in shared_params if p.requires_grad]
+
+        task_grads_shared = []
+        losses = [cl_loss, color_loss, redshift_loss]
+        for loss in losses:
+            opt.zero_grad()
+            self.manual_backward(loss, retain_graph=True)
+            grad = torch.cat([
+                p.grad.flatten() if p.grad is not None else torch.zeros(p.numel(), device=p.device)
+                for p in shared_params
+            ])
+            task_grads_shared.append(grad)
+
+        modified_grads = pcgrad_update(task_grads_shared)
+        final_shared_grad = torch.stack(modified_grads).sum(dim=0) # sums task-specific grads to get one grad for total loss
+
+        opt.zero_grad()
+        offset = 0
+        for p in shared_params:
+            numel = p.numel()
+            p.grad = final_shared_grad[offset: offset + numel].view_as(p).clone()
+            offset += numel
+
+        self.manual_backward(total_loss)
+        opt.step()
+        
+        return total_loss.detach()
     
     def validation_step(self, batch_data, batch_idx):
         batch_images, batch_pits, batch_redshifts, batch_redshift_weights, batch_colors = batch_data
@@ -745,7 +801,16 @@ class CalPITALightning(pl.LightningModule):
         self.log("total_validation_loss", total_loss, on_epoch=True, sync_dist=True)
         
         return total_loss
-    
+
+    def on_train_epoch_end(self):
+        """Manually step the lr scheduler (required with automatic_optimization=False)."""
+        sch = self.lr_schedulers()
+        if sch is not None:
+            if isinstance(sch, list):
+                sch[0].step()
+            else:
+                sch.step()
+                
     def configure_optimizers(self):
         optim = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-05)
         #optim = ADOPT(self.parameters(), lr=self.lr, weight_decay=1e-05)
