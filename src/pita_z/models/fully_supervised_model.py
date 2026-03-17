@@ -211,6 +211,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         y_grid (np.array): Grid of y variable (redshift) on which CDEs are calculated.
         cde_init_type (str): Specifics initial CDE guess.
         lr (float): Learning rate for the optimizer.
+        lamda (float): scaling factor for negative gradient (monotonicity) loss.
         lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
 
         cosine_T_max (int): Number of epochs for cosine annealing cycle. Defaults to 500.
@@ -235,6 +236,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         y_grid=None,
         cde_init_type='uniform',
         lr=None,
+        lamda=1,
         lr_scheduler=None,
         
         # cosine lr params
@@ -261,6 +263,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self.register_buffer("alpha_grid", torch.as_tensor(alpha_grid, dtype=torch.float32))
         self.register_buffer("y_grid", torch.as_tensor(y_grid, dtype=torch.float32))
         self.lr = lr
+        self.lamda = lamda
         self.lr_scheduler = lr_scheduler
         self.cosine_T_max = cosine_T_max
         self.cosine_eta_min = cosine_eta_min
@@ -273,8 +276,12 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self.wc_ann_half_period = wc_ann_half_period
         self.wc_ann_min_lr = wc_ann_min_lr
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, alphas=None, x=None):
+        if alphas is not None:
+            features = torch.hstack([alphas, x])
+            return self.model(features)
+        else:
+            return self.model(x)
 
     def transform(self, x, cde_init):
         """
@@ -292,7 +299,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         )
         # Given x and initial PIT guess, the model predicts what the PIT should be.
         # This PIT on the y-grid is actually the true CDF (if regression is working).
-        cdf_new = self.forward(features.float()).reshape((x.shape[0], len(self.y_grid)))
+        cdf_new = self.forward(alphas=None, x=features.float()).reshape((x.shape[0], len(self.y_grid)))
 
         # Interpolating the predicted CDF, whose derivative is the CDE.
         cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
@@ -301,21 +308,33 @@ class CalpitPhotometryLightning(pl.LightningModule):
         return torch.tensor(cde_new, device=x.device)
         
     def loss_fn(self, predictions, truths):
-        if self.loss_type == 'bce':
+        if self.loss_type in ('bce', 'monotonic_bce'):
             loss = torch.nn.BCELoss(reduction='mean')
             return loss(predictions, truths)
 
+    @staticmethod
+    def monotonicity_loss(output, x_mono):
+        grad = torch.autograd.grad(
+            outputs=output,
+            inputs=x_mono,
+            grad_outputs=torch.ones_like(output),
+            create_graph=True
+        )[0]
+
+        return torch.relu(-grad).mean()
+        
+        
     def training_step(self, batch, batch_idx):
         x, y, true_redshifts, init_cdes = batch
         n_batch = x.shape[0]
-        alphas = torch.rand(n_batch, device=x.device)
-        features = torch.hstack([alphas[:,None], x])
+        alphas = torch.rand(n_batch, 1, device=x.device).requires_grad_(True)
         # Calculating the binary variable W. Mean of W is the true PIT.
-        y = (y <= alphas).float()
+        y = (y <= alphas.squeeze()).float()
 
-        outputs = self.model(features)
-        
+        outputs = self.forward(alphas=alphas, x=x)
         loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
+        if self.loss_type == 'monotonic_bce':
+            loss += self.lamda * self.monotonicity_loss(outputs, alphas)
         self.log("training_loss", loss, on_epoch=True, sync_dist=True)
 
         # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
@@ -349,9 +368,11 @@ class CalpitPhotometryLightning(pl.LightningModule):
         )
         y = (torch.tile(y, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid, n_batch)).float()
 
-        outputs = self.model(features)
+        outputs = self.forward(alphas=None, x=features)
 
         loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
+        # if self.loss_type == 'monotonic_bce':
+        #     loss += self.lamda * self.monotonicity_loss(outputs, features[:,0:1])
         self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
 
         # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
@@ -424,6 +445,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
         transforms (callable): Optional image augmentations.
         transforms_val (callable): Optional image augmentations for the validation set.
         lr (float): Learning rate for the optimizer.
+        lamda (float): scaling factor for negative gradient (monotonicity) loss.
         lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
 
         cosine_T_max (int): Number of epochs for cosine annealing cycle. Defaults to 500.
@@ -453,6 +475,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
         transforms=None,
         transforms_val=None,
         lr=None,
+        lamda=1,
         lr_scheduler=None,
 
         # cosine lr params
@@ -485,6 +508,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
         self.transforms = transforms
         self.transforms_val = transforms_val
         self.lr = lr
+        self.lamda = lamda
         self.lr_scheduler = lr_scheduler
         self.cosine_T_max = cosine_T_max
         self.cosine_eta_min = cosine_eta_min
@@ -507,10 +531,10 @@ class CalpitCNNPhotoz(pl.LightningModule):
         x = self.encoder_mlp(x)
         n_batch = x.shape[0]
         if goal == 'train':
-            alphas = torch.rand(n_batch, device=x.device)
-            x = torch.hstack([alphas[:,None], x])
+            alphas = torch.rand(n_batch, 1, device=x.device).requires_grad_(True)
+            x = torch.hstack([alphas, x])
             x = self.redshift_mlp(x)
-            return x.squeeze(), alphas
+            return x, alphas
         elif goal == 'validate':
             n_alphas = len(self.alpha_grid)
             x = torch.cat(
@@ -521,7 +545,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
                 dim=-1
             )
             x = self.redshift_mlp(x)
-            return x.squeeze(), None
+            return x, None
 
     @torch.no_grad()
     def transform_cde(self, x):
@@ -551,10 +575,21 @@ class CalpitCNNPhotoz(pl.LightningModule):
         return torch.tensor(cde_new, device=x.device)
 
     def loss_fn(self, predictions, truths):
-        if self.loss_type == 'bce':
+        if self.loss_type in ('bce', 'monotonic_bce'):
             loss = torch.nn.BCELoss(reduction='mean')
             return loss(predictions, truths)
-    
+
+    @staticmethod
+    def monotonicity_loss(output, x_mono):
+        grad = torch.autograd.grad(
+            outputs=output,
+            inputs=x_mono,
+            grad_outputs=torch.ones_like(output),
+            create_graph=True
+        )[0]
+
+        return torch.relu(-grad).mean()
+        
     def training_step(self, batch_data, batch_idx):
         """
         Training step: processes the batch, computes the loss, and logs metrics.
@@ -568,8 +603,10 @@ class CalpitCNNPhotoz(pl.LightningModule):
         # To do so, they are generated randomly in the forward function (if goal='Train').
         # forward function also returns these random alphas to calculate true W (binary PIT variable) and loss.
         batch_predictions, alphas = self.forward(batch_images, goal='train')
-        y = (batch_pits <= alphas).float()
-        loss = self.loss_fn(batch_predictions, torch.squeeze(y))
+        y = (batch_pits <= alphas.squeeze()).float()
+        loss = self.loss_fn(batch_predictions.squeeze(), torch.squeeze(y))
+        if self.loss_type == 'monotonic_bce':
+            loss += self.lamda * self.monotonicity_loss(batch_predictions, alphas)
         
         self.log("training_loss", loss, on_epoch=True, sync_dist=True)
         
@@ -605,7 +642,7 @@ class CalpitCNNPhotoz(pl.LightningModule):
         n_alphas = len(self.alpha_grid)
         y = (torch.tile(batch_pits, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid, n_batch)).float()
         
-        loss = self.loss_fn(batch_predictions, torch.squeeze(y))
+        loss = self.loss_fn(batch_predictions.squeeze(), torch.squeeze(y))
         self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
 
         # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them

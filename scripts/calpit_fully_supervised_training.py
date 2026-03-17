@@ -134,6 +134,7 @@ if __name__ == '__main__':
         transforms=transforms,
         transforms_val=augmentations.JitterCrop(output_dim=config['augmentations']['crop_dim'], jitter_lim=0),
         lr=config['training']['learning_rate'],
+        lamda=config['training']['lamda'],
         lr_scheduler=scheduler_type,
         **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
     )

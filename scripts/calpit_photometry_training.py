@@ -81,9 +81,11 @@ if __name__ == '__main__':
         
     pl_model = fully_supervised_model.CalpitPhotometryLightning(
         model=model,
+        loss_type=config['training']['loss_type'],
         alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),
         y_grid=z_grid.astype('float32'),
         lr=config['training']['learning_rate'],
+        lamda=config['training']['lamda'],
         lr_scheduler=scheduler_type,
         **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
     )
