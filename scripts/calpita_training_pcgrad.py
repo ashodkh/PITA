@@ -146,6 +146,7 @@ if __name__ == '__main__':
         redshift_loss_weight=config['training']['redshift_loss_weight'],
         color_loss_weight=config['training']['color_loss_weight'],
         lr=config['training']['learning_rate'],
+        lamda=config['training']['lamda'],
         lr_scheduler=scheduler_type,
         **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
     )

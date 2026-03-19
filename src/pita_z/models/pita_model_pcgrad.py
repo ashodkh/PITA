@@ -400,6 +400,7 @@ class CalPITALightning(pl.LightningModule):
         redshift_loss_weight=1,
         color_loss_weight=1,
         lr=None,
+        lamda=1,
         lr_scheduler=None,
 
         # cosine lr params
@@ -439,6 +440,7 @@ class CalPITALightning(pl.LightningModule):
         self.redshift_loss_weight = redshift_loss_weight
         self.color_loss_weight = color_loss_weight
         self.lr = lr
+        self.lamda = lamda
         self.lr_scheduler = lr_scheduler
         self.cosine_T_max = cosine_T_max
         self.cosine_eta_min = cosine_eta_min
@@ -493,9 +495,9 @@ class CalPITALightning(pl.LightningModule):
         x_redshift, x_color = None, None            
         if self.redshift_mlp:
             if goal == 'train':
-                alphas = torch.rand(n_batch, device=x.device)
-                x_redshift = torch.hstack([alphas[:,None], x])
-                x_redshift = self.redshift_mlp(x_redshift).squeeze()
+                alphas = torch.rand(n_batch, 1, device=x.device).requires_grad_(True)
+                x_redshift = torch.hstack([alphas, x])
+                x_redshift = self.redshift_mlp(x_redshift)
             elif goal == 'validate':
                 n_alphas = len(self.alpha_grid)
                 x_redshift = torch.cat(
@@ -505,7 +507,7 @@ class CalPITALightning(pl.LightningModule):
                     ],
                     dim=-1
                 )
-                x_redshift = self.redshift_mlp(x_redshift).squeeze()
+                x_redshift = self.redshift_mlp(x_redshift)
         if self.color_mlp:
             x_color = self.color_mlp(x).squeeze()
 
@@ -514,7 +516,6 @@ class CalPITALightning(pl.LightningModule):
         elif goal == 'validate':
             return F.normalize(x_proj, dim=1), x_redshift, x_color, None
             
-    
     @torch.no_grad()
     def update_momentum_encoder(self):
         """Update momentum encoder and its heads using exponential moving average."""
@@ -585,7 +586,7 @@ class CalPITALightning(pl.LightningModule):
         return torch.tensor(cde_new, device=x.device)
     
     def redshift_loss_fn(self, predictions, truths):
-        if self.loss_type == 'bce':
+        if self.loss_type in ('bce', 'monotonic_bce'):
             loss = torch.nn.BCELoss(reduction='mean')
             return loss(predictions, truths)
             
@@ -659,7 +660,18 @@ class CalPITALightning(pl.LightningModule):
                     modified_grads[i] = gi - (dot / (gj.norm() ** 2 + 1e-8)) * gj
     
         return modified_grads
-    
+        
+    @staticmethod
+    def monotonicity_loss(output, x_mono):
+        grad = torch.autograd.grad(
+            outputs=output,
+            inputs=x_mono,
+            grad_outputs=torch.ones_like(output),
+            create_graph=True
+        )[0]
+
+        return torch.relu(-grad).mean()
+        
     def training_step(self, batch_data, batch_idx):
         batch_images, batch_pits, batch_redshifts, batch_redshift_weights, batch_colors = batch_data
         # Apply transformations to create two augmented views
@@ -687,22 +699,31 @@ class CalPITALightning(pl.LightningModule):
 
         total_loss = cl_loss
         if self.redshift_mlp:
-            y = (batch_pits <= alphas).float()
+            y = (batch_pits <= alphas.squeeze()).float()
             good_redshifts_mask = batch_redshift_weights == 1
             if good_redshifts_mask.sum() == 0:
                 # dummy loss makes sure backprop works properly if there are no redshifts
-                dummy_loss = 0 * self.redshift_loss_fn(w_alphas[:1], torch.squeeze(y)[:1])
+                dummy_loss = 0 * self.redshift_loss_fn(w_alphas.squeeze()[:1], torch.squeeze(y)[:1])
+                if self.loss_type == 'monotonic_bce':
+                    dummy_loss += 0 * self.monotonicity_loss(w_alphas, alphas)
                 total_loss += dummy_loss
+                redshift_loss_for_backward = dummy_loss
                 redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
             else:
-                redshift_loss = self.redshift_loss_fn(w_alphas[good_redshifts_mask], torch.squeeze(y)[good_redshifts_mask])
+                redshift_loss = self.redshift_loss_fn(w_alphas.squeeze()[good_redshifts_mask], torch.squeeze(y)[good_redshifts_mask])
                 redshift_loss = redshift_loss * self.redshift_loss_weight
-                total_loss += redshift_loss 
+                total_loss += redshift_loss
                 bias, nmad, outlier_fraction\
                 = self.redshift_metrics(
                     self.transforms_z_metric(batch_images[good_redshifts_mask]),
                     batch_redshifts[good_redshifts_mask]
                 )
+                if self.loss_type == 'monotonic_bce':
+                    mono_loss = self.lamda * self.monotonicity_loss(w_alphas, alphas)
+                    total_loss += mono_loss
+                    redshift_loss_for_backward = redshift_loss + mono_loss
+                else:
+                    redshift_loss_for_backward = redshift_loss
                 
             self.log("losses/redshift_training_loss", redshift_loss, on_epoch=True, sync_dist=True)  
             self.log('metrics/training_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
@@ -730,7 +751,7 @@ class CalPITALightning(pl.LightningModule):
 
         task_grads_shared = []
         saved_task_specific_grads = []
-        losses = [cl_loss, color_loss, redshift_loss]
+        losses = [cl_loss, color_loss, redshift_loss_for_backward]
         grads_norms_pre = []
         for i, (loss, ts_params) in enumerate(zip(losses, task_specific_params)):
             opt.zero_grad()
@@ -799,11 +820,11 @@ class CalPITALightning(pl.LightningModule):
             good_redshifts_mask = batch_redshift_weights == 1
             good_redshifts_mask_tiled = torch.tile(good_redshifts_mask, (n_alphas,))
             if good_redshifts_mask.sum() == 0:
-                dummy_loss = 0 * self.redshift_loss_fn(w_alphas[:1], torch.squeeze(y)[:1])
+                dummy_loss = 0 * self.redshift_loss_fn(w_alphas.squeeze()[:1], torch.squeeze(y)[:1])
                 total_loss += dummy_loss
                 redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
             else:
-                redshift_loss = self.redshift_loss_fn(w_alphas[good_redshifts_mask_tiled], torch.squeeze(y)[good_redshifts_mask_tiled])
+                redshift_loss = self.redshift_loss_fn(w_alphas.squeeze()[good_redshifts_mask_tiled], torch.squeeze(y)[good_redshifts_mask_tiled])
                 redshift_loss = redshift_loss * self.redshift_loss_weight
                 total_loss += redshift_loss
                 bias, nmad, outlier_fraction\
