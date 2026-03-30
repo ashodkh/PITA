@@ -633,16 +633,6 @@ class CalPITALightning(pl.LightningModule):
 
         return bias, nmad, outlier_fraction
 
-    # def _get_shared_layer_params(self):
-    #     """Returns the parameters shared by the three tasks."""
-    #     params = []
-    #     for module in self.encoder.modules():
-    #         params.extend(module.parameters(recurse=False))
-    #     for module in self.encoder_mlp.modules():
-    #         params.extend(module.parameters(recurse=False))
-    
-    #     return params
-
     @staticmethod
     def pcgrad_update(grads: list[torch.Tensor]) -> list[torch.Tensor]:
         num_tasks = len(grads)
@@ -662,7 +652,7 @@ class CalPITALightning(pl.LightningModule):
         return modified_grads
         
     @staticmethod
-    def monotonicity_loss(output, x_mono):
+    def monotonicity_loss(output, x_mono, mask=None):
         grad = torch.autograd.grad(
             outputs=output,
             inputs=x_mono,
@@ -670,6 +660,8 @@ class CalPITALightning(pl.LightningModule):
             create_graph=True
         )[0]
 
+        if mask is not None:
+            return torch.relu(-grad[mask]).mean()
         return torch.relu(-grad).mean()
         
     def training_step(self, batch_data, batch_idx):
@@ -707,23 +699,18 @@ class CalPITALightning(pl.LightningModule):
                 if self.loss_type == 'monotonic_bce':
                     dummy_loss += 0 * self.monotonicity_loss(w_alphas, alphas)
                 total_loss += dummy_loss
-                redshift_loss_for_backward = dummy_loss
                 redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
             else:
                 redshift_loss = self.redshift_loss_fn(w_alphas.squeeze()[good_redshifts_mask], torch.squeeze(y)[good_redshifts_mask])
                 redshift_loss = redshift_loss * self.redshift_loss_weight
+                if self.loss_type == 'monotonic_bce':
+                    redshift_loss += self.lamda * self.monotonicity_loss(w_alphas, alphas, good_redshifts_mask)
                 total_loss += redshift_loss
                 bias, nmad, outlier_fraction\
                 = self.redshift_metrics(
                     self.transforms_z_metric(batch_images[good_redshifts_mask]),
                     batch_redshifts[good_redshifts_mask]
                 )
-                if self.loss_type == 'monotonic_bce':
-                    mono_loss = self.lamda * self.monotonicity_loss(w_alphas, alphas)
-                    total_loss += mono_loss
-                    redshift_loss_for_backward = redshift_loss + mono_loss
-                else:
-                    redshift_loss_for_backward = redshift_loss
                 
             self.log("losses/redshift_training_loss", redshift_loss, on_epoch=True, sync_dist=True)  
             self.log('metrics/training_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
@@ -751,7 +738,7 @@ class CalPITALightning(pl.LightningModule):
 
         task_grads_shared = []
         saved_task_specific_grads = []
-        losses = [cl_loss, color_loss, redshift_loss_for_backward]
+        losses = [cl_loss, color_loss, redshift_loss]
         grads_norms_pre = []
         for i, (loss, ts_params) in enumerate(zip(losses, task_specific_params)):
             opt.zero_grad()
