@@ -123,9 +123,11 @@ if __name__ == '__main__':
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
     scheduler_params = lr_scheduler_config[scheduler_type]
-    if scheduler_type == 'None':
-        # if None, scheduler_params are dummy params from config
-        scheduler_type = None
+    scheduler_kwargs = (
+        {f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        if scheduler_type is not None
+        else {}
+    )
         
     pl_model = pita_model_pcgrad.CalPITALightning(
         encoder=encoder,
@@ -148,7 +150,7 @@ if __name__ == '__main__':
         lr=config['training']['learning_rate'],
         lamda=config['training']['lamda'],
         lr_scheduler=scheduler_type,
-        **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        **scheduler_kwargs
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'

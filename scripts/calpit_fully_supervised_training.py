@@ -23,7 +23,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/calpit/configs/'
+config_dir = '/global/homes/a/ashodkh/cosmosweb/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -119,9 +119,11 @@ if __name__ == '__main__':
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
     scheduler_params = lr_scheduler_config[scheduler_type]
-    if scheduler_type == 'None':
-        # if None, scheduler_params are dummy params from config
-        scheduler_type = None
+    scheduler_kwargs = (
+        {f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        if scheduler_type is not None
+        else {}
+    )
     
     pl_model = fully_supervised_model.CalpitCNNPhotoz(
         encoder=encoder,
@@ -136,7 +138,7 @@ if __name__ == '__main__':
         lr=config['training']['learning_rate'],
         lamda=config['training']['lamda'],
         lr_scheduler=scheduler_type,
-        **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        **scheduler_kwargs
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
@@ -165,7 +167,7 @@ if __name__ == '__main__':
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/calpit/scripts",
+        default_root_dir="/global/homes/a/ashodkh/cosmosweb/scripts",
         strategy='ddp',
         logger=tb_logger,
         enable_progress_bar=False,
