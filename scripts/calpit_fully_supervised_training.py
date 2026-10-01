@@ -69,7 +69,7 @@ if __name__ == '__main__':
 
     reddening_transform = reddening.ReddeningTransform(R=config['augmentations']['reddening_R'], redden_aug=False)
     if config['augmentations']['gaussian_transform']:
-        band_mads = np.load(config['data']['path_band_mads']).astype(np.float32)
+        band_mads = np.load(config['data']['path_band_mads'])[:config['data']['n_filters']].astype(np.float32)
         transforms = v2.Compose([
             v2.RandomHorizontalFlip(0.5),
             v2.RandomRotation(180, interpolation=v2.InterpolationMode.BILINEAR),
@@ -95,7 +95,11 @@ if __name__ == '__main__':
         with_weights=True,
         reddening_transform=reddening_transform,
         load_ebv=True,
-        label_f=config['data']['label_f']
+        label_f=config['data']['label_f'],
+        image_name=config['data']['image_name'],
+        image_idxs=config['data']['image_idxs'],
+        color_feature_name=config['data']['color_feature_name'],
+        color_feature_idxs=config['data']['color_feature_idxs']
     )
      
     ## prepping model
@@ -118,7 +122,7 @@ if __name__ == '__main__':
     # Various learning rate schedulers can be used. Set in the config file.
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
-    scheduler_params = lr_scheduler_config[scheduler_type]
+    scheduler_params = lr_scheduler_config[scheduler_type] if scheduler_type else None
     scheduler_kwargs = (
         {f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
         if scheduler_type is not None
@@ -130,7 +134,7 @@ if __name__ == '__main__':
         encoder_mlp=encoder_mlp,
         redshift_mlp=redshift_mlp,
         loss_type=config['training']['loss_type'],
-        alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),
+        alpha_grid=np.linspace(0, 1, config['training']['n_alphas'], dtype='float32'),
         y_grid=z_grid.astype('float32'),
         cde_init_type=config['data']['cde_init_type'],
         transforms=transforms,

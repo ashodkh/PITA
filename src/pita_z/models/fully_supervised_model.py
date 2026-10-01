@@ -1,6 +1,7 @@
 import pytorch_lightning as pl
 import torch
 from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
+from pita_z.utils.metrics import ks_from_uniform
 from calpit.utils import trapz_grid_torch
 from scipy.interpolate import PchipInterpolator
 import numpy as np
@@ -283,12 +284,14 @@ class CalpitPhotometryLightning(pl.LightningModule):
         else:
             return self.model(x)
 
-    def transform(self, x, cde_init):
+    def transform(self, x, cde_init, y_grid=None):
         """
         Transforms the initial CDE guesses to the calibrated CDEs.
         """
+        if y_grid is None:
+            y_grid = self.y_grid
         # Making an array of initial CDEs
-        cdf_init = trapz_grid_torch(cde_init, self.y_grid)
+        cdf_init = trapz_grid_torch(cde_init, y_grid)
         # Initial CDFs are the initial PIT guesses
         features = torch.cat(
             [
@@ -299,12 +302,12 @@ class CalpitPhotometryLightning(pl.LightningModule):
         )
         # Given x and initial PIT guess, the model predicts what the PIT should be.
         # This PIT on the y-grid is actually the true CDF (if regression is working).
-        cdf_new = self.forward(alphas=None, x=features.float()).reshape((x.shape[0], len(self.y_grid)))
+        cdf_new = self.forward(alphas=None, x=features.float()).reshape((x.shape[0], len(y_grid)))
 
         # Interpolating the predicted CDF, whose derivative is the CDE.
-        cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
+        cdf_new_funct = PchipInterpolator(y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
         pdf_func = cdf_new_funct.derivative(1)
-        cde_new = pdf_func(self.y_grid.detach().cpu())
+        cde_new = pdf_func(y_grid.detach().cpu())
         return torch.tensor(cde_new, device=x.device)
         
     def loss_fn(self, predictions, truths):
@@ -379,6 +382,11 @@ class CalpitPhotometryLightning(pl.LightningModule):
         batch_cdes = self.transform(x, init_cdes)
         max_idxs = torch.argmax(batch_cdes, axis=1)
         max_ys = self.y_grid[max_idxs]
+
+        batch_cdfs = torch.cumsum(batch_cdes, axis=1) * (self.y_grid[1] - self.y_grid[0])
+        z_ref_idxs = torch.searchsorted(self.y_grid, true_redshifts)
+        z_ref_idxs[z_ref_idxs == len(self.y_grid)] = len(self.y_grid) - 1
+        batch_pits = batch_cdfs[torch.arange(len(batch_cdfs)),z_ref_idxs]
         
         delta = (max_ys - true_redshifts) / (1 + true_redshifts)
         bias = torch.mean(delta)
@@ -388,6 +396,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self.log('val_bias', bias, on_epoch=True, sync_dist=True)
         self.log('val_nmad', nmad, on_epoch=True, sync_dist=True)
         self.log('val_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
+        self.log('val_pits', ks_from_uniform(batch_pits, absolute=False), on_epoch=True, sync_dist=True)
         
         return loss
         

@@ -23,7 +23,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/calpit/configs/'
+config_dir = '/global/homes/a/ashodkh/rubin_dp2/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -69,7 +69,9 @@ if __name__ == '__main__':
 
     reddening_transform = reddening.ReddeningTransform(R=config['augmentations']['reddening_R'], redden_aug=False)
     if config['augmentations']['gaussian_transform']:
-        band_mads = np.load(config['data']['path_band_mads']).astype(np.float32)
+        band_mads = np.load(config['data']['path_band_mads'])[config["data"]["image_idxs"]].astype(np.float32)
+        if config["data"]["flux_masks"]:
+            band_mads = np.concatenate((band_mads, np.zeros(len(band_mads), dtype=np.float32)))
         transforms = v2.Compose([
             v2.RandomHorizontalFlip(0.5),
             v2.RandomRotation(180, interpolation=v2.InterpolationMode.BILINEAR),
@@ -95,36 +97,41 @@ if __name__ == '__main__':
         with_weights=True,
         reddening_transform=reddening_transform,
         load_ebv=True,
-        label_f=config['data']['label_f']
+        label_f=config['data']['label_f'],
+        image_name=config['data']['image_name'],
+        image_idxs=config['data']['image_idxs'],
+        color_feature_name=config['data']['color_feature_name'],
+        color_feature_idxs=config['data']['color_feature_idxs'],
+        flux_masks=config['data']['flux_masks']
     )
      
     ## prepping model
 
     latent_d = config['model']['latent_d']
     projection_d = config['model']['projection_d']
-    encoder = models.convnext_tiny(weights=None)
-    encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 96, kernel_size=(4,4), stride=(4,4))
+    encoder = models.convnext_base(weights=None)
+    encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 128, kernel_size=(4,4), stride=(4,4))
     encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
     projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128], output_dim=projection_d)
     color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'], output_dim=config['data']['n_filters'])    
     if config['model']['type'] == 'MLP':
         redshift_mlp = calpit.nn.models.MLP(
                 latent_d+1, # 4 photometric fluxes + 1 alpha
-                config['model']['redshift_mlp_hidden_layers']
+                config['model']['redshift_mlp_hidden_layers'],
+                sigmoid=False
             )
     elif config['model']['type'] == 'UMNN':
         redshift_mlp = calpit.nn.umnn.MonotonicNN(
             latent_d+1,
             config['model']['redshift_mlp_hidden_layers'],
-            sigmoid=True
+            sigmoid=False
         )
 
     # Various learning rate schedulers can be used. Set in the config file.
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
-    scheduler_params = lr_scheduler_config[scheduler_type]
     scheduler_kwargs = (
-        {f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        {f"{scheduler_type}_{k}": v for k, v in lr_scheduler_config[scheduler_type].items()}
         if scheduler_type is not None
         else {}
     )
@@ -180,7 +187,7 @@ if __name__ == '__main__':
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/calpit/scripts",
+        default_root_dir="/global/homes/a/ashodkh/rubin_dp2/scripts",
         strategy='ddp_find_unused_parameters_true',
         logger=tb_logger,
         enable_progress_bar=False,

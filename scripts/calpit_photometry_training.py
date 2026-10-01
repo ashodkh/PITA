@@ -18,7 +18,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/cosmosweb/configs/'
+config_dir = '/global/homes/a/ashodkh/rubin_dp2/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -41,6 +41,7 @@ if __name__ == '__main__':
         init_cde_path_val=config['initial_cde'][init_cde_type]['init_cde_path_val'],
         init_cde_type=init_cde_type,
         feature_name=config['data']['feature_name'],
+        feature_idxs=config['data']['feature_idxs'],
         scaler_path=None,
         batch_size=config['data']['batch_size'],
         num_workers=config['data']['num_workers'],
@@ -74,17 +75,17 @@ if __name__ == '__main__':
     # Various learning rate schedulers can be used. Set in the config file.
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
-    scheduler_params = lr_scheduler_config[scheduler_type]
+    scheduler_params = lr_scheduler_config[scheduler_type] if scheduler_type else None
     scheduler_kwargs = (
         {f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
-        if scheduler_type is not None
+        if scheduler_type
         else {}
     )
         
     pl_model = fully_supervised_model.CalpitPhotometryLightning(
         model=model,
         loss_type=config['training']['loss_type'],
-        alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),
+        alpha_grid=np.linspace(0, 1, config['training']['n_alphas'], dtype='float32'),
         y_grid=z_grid.astype('float32'),
         lr=config['training']['learning_rate'],
         lamda=config['training']['lamda'],
@@ -119,7 +120,7 @@ if __name__ == '__main__':
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/cosmosweb/scripts",
+        default_root_dir="/global/homes/a/ashodkh/rubin_dp2/scripts",
         strategy='ddp',
         logger=tb_logger,
         enable_progress_bar=False,

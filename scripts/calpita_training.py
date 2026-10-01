@@ -23,7 +23,7 @@ parser.add_argument('run', type=int)
 args = parser.parse_args()
 
 config_file = args.config_file
-config_dir = '/global/homes/a/ashodkh/calpit/configs/'
+config_dir = '/global/homes/a/ashodkh/rubin_dp2/configs/'
 with open(config_dir + f"{config_file}.yaml", "r") as f:
     config = yaml.safe_load(f)
 run = args.run
@@ -54,18 +54,20 @@ if __name__ == '__main__':
         cde_val = np.zeros((y_val.shape[0],n_grid), dtype='float32')
         cde_val[:,:] = 1 / (z_max - z_min)
 
-    # these pits are used to calculate the loss function (typical y or output)
+    ##  these pits are used to calculate the loss function (typical y or output)
     pit_train = calpit.metrics.probability_integral_transform(
         cde_train,
         z_grid,
         y_train
     )
+    #pit_train = y_train / (z_max - z_min)
 
     pit_val = calpit.metrics.probability_integral_transform(
         cde_val,
         z_grid,
         y_val
     )
+    #pit_val = y_val / (z_max - z_min)
 
     reddening_transform = reddening.ReddeningTransform(R=config['augmentations']['reddening_R'], redden_aug=False)
     if config['augmentations']['gaussian_transform']:
@@ -95,37 +97,44 @@ if __name__ == '__main__':
         with_weights=True,
         reddening_transform=reddening_transform,
         load_ebv=True,
-        label_f=config['data']['label_f']
+        label_f=config['data']['label_f'],
+        image_name=config['data']['image_name'],
+        image_idxs=config['data']['image_idxs'],
+        color_feature_name=config['data']['color_feature_name'],
+        color_feature_idxs=config['data']['color_feature_idxs']
     )
      
     ## prepping model
 
     latent_d = config['model']['latent_d']
     projection_d = config['model']['projection_d']
-    encoder = models.convnext_tiny(weights=None)
-    encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 96, kernel_size=(4,4), stride=(4,4))
+    encoder = models.convnext_base(weights=None)
+    encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 128, kernel_size=(4,4), stride=(4,4))
     encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
     projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128], output_dim=projection_d)
     color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'], output_dim=config['data']['n_filters'])    
     if config['model']['type'] == 'MLP':
         redshift_mlp = calpit.nn.models.MLP(
                 latent_d+1, # 4 photometric fluxes + 1 alpha
-                config['model']['redshift_mlp_hidden_layers']
+                config['model']['redshift_mlp_hidden_layers'],
+                sigmoid=False
             )
     elif config['model']['type'] == 'UMNN':
         redshift_mlp = calpit.nn.umnn.MonotonicNN(
             latent_d+1,
             config['model']['redshift_mlp_hidden_layers'],
-            sigmoid=True
+            sigmoid=False
         )
 
     # Various learning rate schedulers can be used. Set in the config file.
     lr_scheduler_config = config['training']['lr_scheduler']
     scheduler_type = lr_scheduler_config['type']
     scheduler_params = lr_scheduler_config[scheduler_type]
-    if scheduler_type == 'None':
-        # if None, scheduler_params are dummy params from config
-        scheduler_type = None
+    scheduler_kwargs = (
+        {f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        if scheduler_type is not None
+        else {}
+    )
         
     pl_model = pita_model.CalPITALightning(
         encoder=encoder,
@@ -146,8 +155,9 @@ if __name__ == '__main__':
         redshift_loss_weight=config['training']['redshift_loss_weight'],
         color_loss_weight=config['training']['color_loss_weight'],
         lr=config['training']['learning_rate'],
+        lamda=config['training']['lamda'],
         lr_scheduler=scheduler_type,
-        **{f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        **scheduler_kwargs
     )
     
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
@@ -177,7 +187,7 @@ if __name__ == '__main__':
         max_epochs=config['training']['epochs'],
         precision='32',
         log_every_n_steps=1,
-        default_root_dir="/global/homes/a/ashodkh/calpit/scripts",
+        default_root_dir="/global/homes/a/ashodkh/rubin_dp2/scripts",
         strategy='ddp_find_unused_parameters_true',
         logger=tb_logger,
         enable_progress_bar=False,

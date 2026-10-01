@@ -171,15 +171,16 @@ class CalpitPhotometryDataset(torch.utils.data.Dataset):
         init_cde_path=None,
         init_cde_type='uniform',
         feature_name=None,
+        feature_idxs=None,
         y_grid=None,
         scaler_path=None,
     ):
-        if Path(path_file).suffix == '.hdf5':
-            self.file = h5py.File(path_file, 'r')
+        self.file = h5py.File(path_file, 'r')
         if init_cde_path:
             self.cde_file = h5py.File(init_cde_path, 'r')
         self.init_cde_type = init_cde_type
         self.feature_name = feature_name
+        self.feature_idxs = feature_idxs
         self.y_grid = y_grid
         self.scaler = load(scaler_path) if scaler_path else None
 
@@ -188,7 +189,8 @@ class CalpitPhotometryDataset(torch.utils.data.Dataset):
         return len(self.file[key])
 
     def __getitem__(self, idx):
-        x = self.file[self.feature_name][idx].astype(np.float32)
+        x = self.file[self.feature_name][idx,self.feature_idxs].astype(np.float32)
+        #x = self.file[self.feature_name][idx].astype(np.float32)
         redshift = self.file['redshifts'][idx].astype(np.float32)
         if self.init_cde_type == 'uniform':
             cde = np.ones(len(self.y_grid)) / (self.y_grid[-1] - self.y_grid[0])
@@ -226,6 +228,7 @@ class CalpitPhotometryDataModule(pl.LightningDataModule):
         init_cde_path_val: str=None,
         init_cde_type: str='uniform',
         feature_name: str=None,
+        feature_idxs: list=[],
         scaler_path: str=None,
         batch_size: int=None,
         num_workers: int=None,
@@ -238,6 +241,7 @@ class CalpitPhotometryDataModule(pl.LightningDataModule):
         self.init_cde_path_val = init_cde_path_val
         self.init_cde_type = init_cde_type
         self.feature_name = feature_name
+        self.feature_idxs = feature_idxs
         self.scaler_path = scaler_path
         self.batch_size = batch_size
         self.num_workers = num_workers
@@ -249,6 +253,7 @@ class CalpitPhotometryDataModule(pl.LightningDataModule):
             init_cde_path=self.init_cde_path_train,
             init_cde_type=self.init_cde_type,
             feature_name=self.feature_name,
+            feature_idxs=self.feature_idxs,
             y_grid=self.y_grid,
             scaler_path=self.scaler_path
         )
@@ -258,6 +263,7 @@ class CalpitPhotometryDataModule(pl.LightningDataModule):
             init_cde_path=self.init_cde_path_val,
             init_cde_type=self.init_cde_type,
             feature_name=self.feature_name,
+            feature_idxs=self.feature_idxs,
             y_grid=self.y_grid,
             scaler_path=self.scaler_path
         )
@@ -295,11 +301,15 @@ class CalpitImagesDataset(torch.utils.data.Dataset):
         with_weights: bool = False,
         reddening_transform = None,
         load_ebv: bool = False,
-        label_f: int = 1
+        label_f: int = 1,
+        image_name: str = None,
+        image_idxs: list = [],
+        color_feature_name: str = None,
+        color_feature_idxs: list = [],
+        flux_masks: bool = False,
     ):
         super().__init__()
-        if Path(path_file).suffix == '.hdf5':
-            self.file = h5py.File(path_file, 'r')
+        self.file = h5py.File(path_file, 'r')
         self.pit = pit
         self.with_redshift = with_redshift
         self.with_features = with_features
@@ -307,23 +317,37 @@ class CalpitImagesDataset(torch.utils.data.Dataset):
         self.reddening_transform = reddening_transform
         self.load_ebv = load_ebv
         self.label_f = label_f
-
+        self.image_name = image_name
+        self.image_idxs = image_idxs
+        self.color_feature_name = color_feature_name
+        self.color_feature_idxs = color_feature_idxs
+        self.flux_masks = flux_masks
+        
     def __len__(self) -> int:
-        return len(self.file['images'])
+        return self.file[self.image_name].shape[0]
     
     def __getitem__(self, idx: int):
-        image = self.file['images'][idx]
+        if self.image_name:
+            image = self.file[self.image_name][idx,self.image_idxs]
+        else:
+            image = np.concatenate((self.file['hsc_images'][idx], self.file['jwst_images'][idx]), axis=0)[self.image_idxs]
         ebv = self.file['ebvs'][idx] if self.load_ebv else None
         redshift = self.file['redshifts'][idx] if self.with_redshift else None
-        color_features = self.file['dered_color_features'][idx] if self.with_features else 1
+        #color_features = self.file['dered_color_features'][idx,[0,1,2,3,4,5,8]] if self.with_features else 1
+        color_features = self.file[self.color_feature_name][idx,self.color_feature_idxs] if self.with_features else 1
+        color_feature_masks = self.file[self.color_feature_name + '_masks'][idx,self.color_feature_idxs] if self.flux_masks else 1
         redshift_weight = self.file[f'use_redshift_{self.label_f}'][idx] if self.with_weights else 1
 
         # Apply reddening transformation if provided
         if self.reddening_transform:
             image = self.reddening_transform([image, ebv])
 
+        if self.flux_masks:
+                mask_img = self.file["flux_masks"][idx]
+                image = np.concatenate((image, mask_img), axis=0)
+            
         if self.with_redshift:
-            return image.astype(np.float32), self.pit[idx], redshift.astype(np.float32), redshift_weight.astype(np.float32), color_features.astype(np.float32)
+            return image.astype(np.float32), self.pit[idx], redshift.astype(np.float32), redshift_weight.astype(np.float32), color_features.astype(np.float32), color_feature_masks.astype(np.float32)
         else:
             return image.astype(np.float32), self.pit[idx]
 
@@ -360,7 +384,12 @@ class CalpitImagesDataModule(pl.LightningDataModule):
         with_weights: bool = False,
         reddening_transform = None,
         load_ebv: bool = False,
-        label_f: int = 1
+        label_f: int = 1,
+        image_name: str = None,
+        image_idxs: list = [],
+        color_feature_name: str = None,
+        color_feature_idxs: list = [],
+        flux_masks: bool = False,
     ):
         super().__init__()
         self.batch_size = batch_size
@@ -375,7 +404,11 @@ class CalpitImagesDataModule(pl.LightningDataModule):
         self.reddening_transform = reddening_transform
         self.load_ebv = load_ebv
         self.label_f = label_f
-
+        self.image_name = image_name
+        self.image_idxs = image_idxs
+        self.color_feature_name = color_feature_name
+        self.color_feature_idxs = color_feature_idxs
+        self.flux_masks = flux_masks
 
     def setup(self, stage):
         self.images_train = self._create_dataset(
@@ -398,7 +431,12 @@ class CalpitImagesDataModule(pl.LightningDataModule):
             with_weights=self.with_weights,
             reddening_transform=self.reddening_transform,
             load_ebv=self.load_ebv,
-            label_f=label_f
+            label_f=label_f,
+            image_name=self.image_name,
+            image_idxs=self.image_idxs,
+            color_feature_name=self.color_feature_name,
+            color_feature_idxs=self.color_feature_idxs,
+            flux_masks=self.flux_masks
         )
 
     def train_dataloader(self) -> DataLoader:

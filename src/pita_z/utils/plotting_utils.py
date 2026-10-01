@@ -1,15 +1,7 @@
 import numpy as np
 import pylab as plt
 from matplotlib.colors import ListedColormap
-
-def calculate_stats(y, y_pred, outlier_f=0.15):
-    delta = (y_pred - y)/(1+y)
-    bias = np.mean(delta)
-    nmad = 1.4826*np.median(np.abs(delta - np.median(delta)))
-    outlier_fraction = np.sum(np.abs(delta)>outlier_f)/len(y)
-    nmad_err = nmad/np.sqrt(2*len(y))
-    outlier_f_error = np.sqrt(outlier_fraction*(1-outlier_fraction)/len(y))
-    return bias, nmad, outlier_fraction, nmad_err, outlier_f_error
+from pita_z.utils.metrics import bias_nmad_outliers
 
 def get_cmap_white(cmap):
     mycmap = plt.get_cmap(cmap, 256)
@@ -20,23 +12,22 @@ def get_cmap_white(cmap):
     mycmap_white = ListedColormap(newcolors, name=f"{mycmap.name}_white")
     return mycmap_white
     
-def photoz_plot_2d_hist(fig=None, ax=None, x=None, y=None, cmap=None,  bins=100, cmin=0, cmax=100,\
-                        range=[[0,4], [0,4]], lines_color='m', lw=2, outlier_f=0.15):
+def photoz_plot_2d_hist(fig=None, ax=None, x=None, y=None, cmap=None,  bins=100, vmin=0, vmax=100,\
+                        range=[[0,4], [0,4]], lines_color='m', lw=2, outlier_threshold=0.15, remove_outliers_for_bias=True):
 
     x_plot = np.linspace(0, 4, 100)
-    y_p = outlier_f*(1+x_plot)+x_plot
-    y_m = -outlier_f*(1+x_plot)+x_plot
+    y_p = outlier_threshold*(1+x_plot)+x_plot
+    y_m = -outlier_threshold*(1+x_plot)+x_plot
     ax.plot(x_plot,x_plot, ls='-', lw=lw, c=lines_color)
     ax.plot(x_plot, y_p, ls='--', lw=lw, c=lines_color)
     ax.plot(x_plot, y_m, ls='--', lw=lw, c=lines_color)
     
-    sd = ax.hist2d(x, y, cmap=cmap, bins=bins, range=range, cmin=cmin, cmax=cmax)
-    bias, nmad, outlier_fraction, _, _ = calculate_stats(x, y, outlier_f=outlier_f)
-    ax.annotate(f'Bias: {bias:.3f}\nNMAD: {nmad:.3f}\nOutliers : {outlier_fraction*100:.1f}%', xy=(0.05, 0.95), xycoords='axes fraction', ha='left', va='top')
+    sd = ax.hist2d(x, y, cmap=cmap, bins=bins, range=range, vmin=vmin, vmax=vmax)
+    bias, nmad, outlier_fraction, _, _ = bias_nmad_outliers(x, y, outlier_threshold, remove_outliers_for_bias)
+    ax.annotate(f'Bias: {bias:.4f}\nNMAD: {nmad:.4f}\nOutliers : {outlier_fraction*100:.2f}%', xy=(0.05, 0.95), xycoords='axes fraction', ha='left', va='top')
     
     ax.set_xlim(0, 4)
     ax.set_ylim(0, 4)
 
     return fig, ax, sd[3]
-
     

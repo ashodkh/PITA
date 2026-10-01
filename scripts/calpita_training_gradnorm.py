@@ -110,13 +110,14 @@ if __name__ == '__main__':
     if config['model']['type'] == 'MLP':
         redshift_mlp = calpit.nn.models.MLP(
                 latent_d+1, # 4 photometric fluxes + 1 alpha
-                config['model']['redshift_mlp_hidden_layers']
+                config['model']['redshift_mlp_hidden_layers'],
+                sigmoid=False
             )
     elif config['model']['type'] == 'UMNN':
         redshift_mlp = calpit.nn.umnn.MonotonicNN(
             latent_d+1,
             config['model']['redshift_mlp_hidden_layers'],
-            sigmoid=True
+            sigmoid=False
         )
 
     # Various learning rate schedulers can be used. Set in the config file.

@@ -73,6 +73,15 @@ if __name__ == '__main__':
     # encoder = basic_models.Encoder(input_channels=config['data']['n_filters'], first_layer_output_channels=32, joint_blocks=joint_blocks)
     # encoder_mlp = None
     # redshift_mlp = basic_models.MLP(input_dim=1024, hidden_layers=[512,256,64,1])  
+
+    lr_scheduler_config = config['training']['lr_scheduler']
+    scheduler_type = lr_scheduler_config['type']
+    scheduler_params = lr_scheduler_config[scheduler_type] if scheduler_type else None
+    scheduler_kwargs = (
+        {f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        if scheduler_type
+        else {}
+    )
     
     photoz_model = fully_supervised_model.CNNPhotoz(
         encoder=encoder,
@@ -80,10 +89,8 @@ if __name__ == '__main__':
         redshift_mlp=redshift_mlp,
         transforms=transforms,
         lr=config['training']['learning_rate'],
-        lr_scheduler=config['training']['lr_scheduler']['type'],
-        warmupcosine_warmup_epochs=config['training']['lr_scheduler']['wc_ann']['warmup_epochs'],
-        warmupcosine_half_period=config['training']['lr_scheduler']['wc_ann']['half_period'],
-        warmupcosine_min_lr=config['training']['lr_scheduler']['wc_ann']['min_lr']
+        lr_scheduler=scheduler_type,
+        **scheduler_kwargs
     )
 
     checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'

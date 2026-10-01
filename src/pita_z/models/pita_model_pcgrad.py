@@ -363,7 +363,7 @@ class CalPITALightning(pl.LightningModule):
         encoder_mlp (nn.Module, optional): An optional MLP that projects encoder outputs to a lower dimension.
         projection_head (nn.Module): An MLP that projects encoder outputs (or encoder_mlp outputs)
                                      to a lower-dimensional space where the contrastive loss is calculated.
-        redshift_mlp (nn.Module): An MLP that estimates redshift from encoder outputs (or encoder_mlp outputs).
+        redshift_mlp (nn.Module): A head returning CDF logits, without a final sigmoid.
         color_mlp (nn.Module): An MLP that estimates photometric colors from encoder outputs (or encoder_mlp outputs).
         loss_type (string): Calpit loss type. Default is binary cross-entropy.
         alpha_grid (np.ndarray or torch.tensor): Fixed grid of alpha's to calculate validation loss.
@@ -476,7 +476,7 @@ class CalPITALightning(pl.LightningModule):
     
     def forward(self, x, use_momentum_encoder=False, goal='train'):
         """
-        Forward pass through the encoder and MLPs.
+        Forward pass through the encoder and MLPs; redshift outputs are logits.
         If goal is 'train', then a random alpha is generated and concatenated to the latent vector.
         If goal is to 'validate', then alpha_grid is concatenated to the latent vector.
         """
@@ -571,7 +571,7 @@ class CalPITALightning(pl.LightningModule):
             ],
             dim = -1
         )
-        cdf_new = self.redshift_mlp(features.float()).reshape((x.shape[0], len(self.y_grid))).detach().cpu()
+        cdf_new = torch.sigmoid(self.redshift_mlp(features.float())).reshape((x.shape[0], len(self.y_grid))).detach().cpu()
         
         cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
         pdf_func = cdf_new_funct.derivative(1)
@@ -585,9 +585,10 @@ class CalPITALightning(pl.LightningModule):
         
         return torch.tensor(cde_new, device=x.device)
     
-    def redshift_loss_fn(self, predictions, truths):
+    def redshift_loss_fn(self, predictions: torch.Tensor, truths: torch.Tensor) -> torch.Tensor:
+        """Mean BCE for CDF logits and binary PIT targets of matching shape."""
         if self.loss_type in ('bce', 'monotonic_bce'):
-            loss = torch.nn.BCELoss(reduction='mean')
+            loss = torch.nn.BCEWithLogitsLoss(reduction='mean')
             return loss(predictions, truths)
             
     def contrastive_loss(self, queries, keys):
@@ -674,7 +675,7 @@ class CalPITALightning(pl.LightningModule):
         # alphas (PITs) are concatenated to the latent vectors.
         # To do so, they are generated randomly in the forward function (if goal='Train').
         # forward function also returns these random alphas to calculate true W (binary PIT variable) and loss.
-        queries, w_alphas, color_predictions, alphas = self.forward(view_1, goal='train') 
+        queries, redshift_logits, color_predictions, alphas = self.forward(view_1, goal='train')
         with torch.no_grad():  # No gradients for momentum encoder
             keys, _, _, _ = self.forward(view_2, use_momentum_encoder=True, goal='train')  # Keys from momentum encoder
 
@@ -695,17 +696,18 @@ class CalPITALightning(pl.LightningModule):
             good_redshifts_mask = batch_redshift_weights == 1
             if good_redshifts_mask.sum() == 0:
                 # dummy loss makes sure backprop works properly if there are no redshifts
-                dummy_loss = 0 * self.redshift_loss_fn(w_alphas.squeeze()[:1], torch.squeeze(y)[:1])
+                dummy_loss = 0 * self.redshift_loss_fn(redshift_logits.squeeze()[:1], torch.squeeze(y)[:1])
                 if self.loss_type == 'monotonic_bce':
-                    dummy_loss += 0 * self.monotonicity_loss(w_alphas, alphas)
-                total_loss += dummy_loss
-                redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
+                    dummy_loss += 0 * self.monotonicity_loss(torch.sigmoid(redshift_logits), alphas)
+                total_loss = total_loss + dummy_loss
+                redshift_loss = dummy_loss
+                bias, nmad, outlier_fraction = 0, 0, 0
             else:
-                redshift_loss = self.redshift_loss_fn(w_alphas.squeeze()[good_redshifts_mask], torch.squeeze(y)[good_redshifts_mask])
+                redshift_loss = self.redshift_loss_fn(redshift_logits.squeeze()[good_redshifts_mask], torch.squeeze(y)[good_redshifts_mask])
                 redshift_loss = redshift_loss * self.redshift_loss_weight
                 if self.loss_type == 'monotonic_bce':
-                    redshift_loss += self.lamda * self.monotonicity_loss(w_alphas, alphas, good_redshifts_mask)
-                total_loss += redshift_loss
+                    redshift_loss += self.lamda * self.monotonicity_loss(torch.sigmoid(redshift_logits), alphas, good_redshifts_mask)
+                total_loss = total_loss + redshift_loss
                 bias, nmad, outlier_fraction\
                 = self.redshift_metrics(
                     self.transforms_z_metric(batch_images[good_redshifts_mask]),
@@ -721,7 +723,7 @@ class CalPITALightning(pl.LightningModule):
             color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
             color_loss = color_loss * self.color_loss_weight
             self.log("losses/color_training_loss", color_loss, on_epoch=True, sync_dist=True)
-            total_loss += color_loss
+            total_loss = total_loss + color_loss
 
         self.log("losses/total_training_loss", total_loss, on_epoch=True, sync_dist=True)
 
@@ -788,7 +790,7 @@ class CalPITALightning(pl.LightningModule):
         # Forward pass for query (main encoder) and key (momentum encoder)
         # Validation is done on the whole range [0,1] of PIT.
         # So they don't need to be generated in the forward function (goal='validate').
-        queries, w_alphas, color_predictions, _ = self.forward(view_1, goal='validate')
+        queries, redshift_logits, color_predictions, _ = self.forward(view_1, goal='validate')
         with torch.no_grad():  # No gradients for momentum encoder
             keys, _, _, _ = self.forward(view_2, use_momentum_encoder=True, goal='validate')  # Keys from momentum encoder
         
@@ -807,13 +809,13 @@ class CalPITALightning(pl.LightningModule):
             good_redshifts_mask = batch_redshift_weights == 1
             good_redshifts_mask_tiled = torch.tile(good_redshifts_mask, (n_alphas,))
             if good_redshifts_mask.sum() == 0:
-                dummy_loss = 0 * self.redshift_loss_fn(w_alphas.squeeze()[:1], torch.squeeze(y)[:1])
-                total_loss += dummy_loss
+                dummy_loss = 0 * self.redshift_loss_fn(redshift_logits.squeeze()[:1], torch.squeeze(y)[:1])
+                total_loss = total_loss + dummy_loss
                 redshift_loss, bias, nmad, outlier_fraction = 0, 0, 0, 0
             else:
-                redshift_loss = self.redshift_loss_fn(w_alphas.squeeze()[good_redshifts_mask_tiled], torch.squeeze(y)[good_redshifts_mask_tiled])
+                redshift_loss = self.redshift_loss_fn(redshift_logits.squeeze()[good_redshifts_mask_tiled], torch.squeeze(y)[good_redshifts_mask_tiled])
                 redshift_loss = redshift_loss * self.redshift_loss_weight
-                total_loss += redshift_loss
+                total_loss = total_loss + redshift_loss
                 bias, nmad, outlier_fraction\
                 = self.redshift_metrics(
                     self.transforms_z_metric(batch_images[good_redshifts_mask]),
@@ -830,7 +832,7 @@ class CalPITALightning(pl.LightningModule):
             color_loss = color_loss * self.color_loss_weight
             self.log("losses/color_validation_loss", color_loss, on_epoch=True, sync_dist=True)
 
-            total_loss += color_loss
+            total_loss = total_loss + color_loss
         
         self.log("losses/total_validation_loss", total_loss, on_epoch=True, sync_dist=True)
         
