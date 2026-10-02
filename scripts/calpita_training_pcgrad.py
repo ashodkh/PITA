@@ -109,8 +109,14 @@ if __name__ == '__main__':
 
     latent_d = config['model']['latent_d']
     projection_d = config['model']['projection_d']
-    encoder = models.convnext_base(weights=None)
-    encoder._modules["features"][0][0] = nn.Conv2d(config['data']['n_filters'], 128, kernel_size=(4,4), stride=(4,4))
+    encoder = models.convnext_tiny(weights=None)
+    encoder._modules["features"][0][0] = nn.Conv2d(
+        config['data']['n_filters'] + int(config['data']['flux_masks'])*config['data']['n_filters'],
+        96,
+        kernel_size=(4,4),
+        stride=(4,4)
+    )
+
     encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
     projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128], output_dim=projection_d)
     color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'], output_dim=config['data']['n_filters'])    

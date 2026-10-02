@@ -335,7 +335,7 @@ class CalpitImagesDataset(torch.utils.data.Dataset):
         redshift = self.file['redshifts'][idx] if self.with_redshift else None
         #color_features = self.file['dered_color_features'][idx,[0,1,2,3,4,5,8]] if self.with_features else 1
         color_features = self.file[self.color_feature_name][idx,self.color_feature_idxs] if self.with_features else 1
-        color_feature_masks = self.file[self.color_feature_name + '_masks'][idx,self.color_feature_idxs] if self.flux_masks else 1
+        color_feature_masks = self.file[self.color_feature_name + '_masks'][idx,self.color_feature_idxs] if self.flux_masks else np.ones_like(color_features, dtype=np.float32)
         redshift_weight = self.file[f'use_redshift_{self.label_f}'][idx] if self.with_weights else 1
 
         # Apply reddening transformation if provided
@@ -343,7 +343,7 @@ class CalpitImagesDataset(torch.utils.data.Dataset):
             image = self.reddening_transform([image, ebv])
 
         if self.flux_masks:
-                mask_img = self.file["flux_masks"][idx]
+                mask_img = self.file["flux_masks"][idx,self.image_idxs]
                 image = np.concatenate((image, mask_img), axis=0)
             
         if self.with_redshift:

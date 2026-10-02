@@ -91,14 +91,14 @@ def ks_from_uniform(pits):
     
     return ks_statistic
 
-def neighbor_metrics(pits, directory, file_name, features, n_neighbors, overwrite=False):
+def neighbor_metrics(pits, directory, file_name, config_file, features, n_neighbors, overwrite=False):
     """
     Calculate local PIT calibration metrics using nearest neighbors in feature space.
     """
 
     directory = Path(directory)
-    neighbor_ks_path = directory / f"{file_name}_neighbor_ks.npy"
-    neighbor_mean_path = directory / f"{file_name}_neighbor_mean.npy"
+    neighbor_ks_path = directory / f"{file_name}_{config_file}_neighbor_ks.npy"
+    neighbor_mean_path = directory / f"{file_name}_{config_file}_eighbor_mean.npy"
 
     if neighbor_ks_path.exists() and neighbor_mean_path.exists() and not overwrite:
         neighbor_pit_ks = np.load(neighbor_ks_path)

@@ -608,7 +608,7 @@ class CalPITALightning(pl.LightningModule):
         return torch.mean(pos_logits)*self.temperature, F.cross_entropy(logits, labels)
     
     def weighted_mse_loss(self, predictions, truths, weights=1):
-        mse_loss = torch.mean((predictions - truths) ** 2 * weights)
+        mse_loss = torch.sum((predictions - truths) ** 2 * weights) / weights.sum().clamp_min(1)
         return mse_loss
     
     def huber_loss(self, predictions, truths, delta=0.15):
@@ -666,7 +666,14 @@ class CalPITALightning(pl.LightningModule):
         return torch.relu(-grad).mean()
         
     def training_step(self, batch_data, batch_idx):
-        batch_images, batch_pits, batch_redshifts, batch_redshift_weights, batch_colors = batch_data
+        (
+            batch_images,
+            batch_pits,
+            batch_redshifts,
+            batch_redshift_weights,
+            batch_colors,
+            batch_color_masks,
+        ) = batch_data
         # Apply transformations to create two augmented views
         view_1 = self.transforms(batch_images)
         view_2 = self.transforms(batch_images)
@@ -720,7 +727,7 @@ class CalPITALightning(pl.LightningModule):
             self.log('metrics/training_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
             
         if self.color_mlp:
-            color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
+            color_loss = self.weighted_mse_loss(color_predictions, batch_colors, batch_color_masks)
             color_loss = color_loss * self.color_loss_weight
             self.log("losses/color_training_loss", color_loss, on_epoch=True, sync_dist=True)
             total_loss = total_loss + color_loss
@@ -781,7 +788,14 @@ class CalPITALightning(pl.LightningModule):
         return total_loss.detach()
     
     def validation_step(self, batch_data, batch_idx):
-        batch_images, batch_pits, batch_redshifts, batch_redshift_weights, batch_colors = batch_data
+        (
+            batch_images,
+            batch_pits,
+            batch_redshifts,
+            batch_redshift_weights,
+            batch_colors,
+            batch_color_masks
+        ) = batch_data
         
         # Apply transformations to create two augmented views
         view_1 = self.transforms(batch_images)
@@ -828,7 +842,7 @@ class CalPITALightning(pl.LightningModule):
             self.log('metrics/val_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
             
         if self.color_mlp is not None:
-            color_loss = self.weighted_mse_loss(color_predictions, batch_colors)
+            color_loss = self.weighted_mse_loss(color_predictions, batch_colors, batch_color_masks)
             color_loss = color_loss * self.color_loss_weight
             self.log("losses/color_validation_loss", color_loss, on_epoch=True, sync_dist=True)
 

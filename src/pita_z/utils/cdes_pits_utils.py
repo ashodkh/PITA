@@ -74,14 +74,14 @@ def predict_calpit_cdes_and_cdfs(model, dataset, cde_init, z_grid, alpha_grid, b
 
     return cde_pred, cdf_pred
     
-def predict_calpita_cdes_and_cdfs(model, images, cde_init, z_grid, alpha_grid, batch_size, transforms, ebvs, R, latent_d):
+def predict_calpita_cdes_and_cdfs(model, datasets, cde_init, z_grid, alpha_grid, batch_size, transforms, ebvs, R, latent_d, flux_masks):
     '''
     Predict calibrated conditional density estimates (CDEs) and cumulative distribution functions (CDFs) in batches.
     
     Arguments
     ---------
         - model (torch.nn.Module): Trained model used to predict CDFs and transform the initial CDEs.
-        - images (h5py dataset): Input image for each sample. Dataset has shape (N_samples, N_bands, px, py).
+        - datasets (h5py dataset): Input dataset which contains images and flux masks. Images have shape (N_samples, N_bands, px, py).
         - cde_init (2D array, (N_samples, grid_dimension)): Initial CDEs evaluated on the redshift grid.
         - z_grid (1D array, grid_dimension): Redshift grid on which the CDEs are evaluated.
         - alpha_grid (1D array or torch.Tensor, grid_dimension): Alpha grid used to evaluate the predicted CDFs.
@@ -90,6 +90,7 @@ def predict_calpita_cdes_and_cdfs(model, images, cde_init, z_grid, alpha_grid, b
         - ebvs (1D array, N_samples): E(B-V) values for deredenning.
         - R (1D array): R value for each band.
         - latent_d (int): Dimensionality of latent space.
+        - flux_masks (bool): whether to use flux masking maps.
     
     Returns
     -------
@@ -97,7 +98,8 @@ def predict_calpita_cdes_and_cdfs(model, images, cde_init, z_grid, alpha_grid, b
         - cdf_pred (2D array, (N_samples, grid_dimension)): Predicted calibrated CDFs.
     '''
     assert len(alpha_grid) == len(z_grid)
-    
+
+    images = datasets["images"]
     n_total = len(images)
     n_grid = len(z_grid)
 
@@ -114,8 +116,17 @@ def predict_calpita_cdes_and_cdfs(model, images, cde_init, z_grid, alpha_grid, b
         for i in tqdm(range(0, n_total, batch_size)):
             i_final = min(i + batch_size, n_total)
             batch_images = transforms(images[i:i_final])
+            batch_flux_masks = transforms(datasets["flux_masks"][i:i_final])
             true_ext = ebvs[i:i_final][:,None] * R[None,:]
             dr_images = torch.tensor(batch_images * (10.**(true_ext[:,:,None,None]/2.5)), dtype=torch.float32, device=device)
+            if flux_masks:
+                dr_images = torch.cat(
+                    (
+                        dr_images,
+                        torch.tensor(batch_flux_masks, dtype=torch.float32, device=device)
+                    ),
+                    axis=1
+                )
 
             cde_pred[i:i_final,:] = model.transform_cde(dr_images).cpu().detach().numpy().squeeze()
             latent_vectors[i:i_final,:] = model.encoder_mlp(model.encoder(dr_images)).cpu().detach().numpy().squeeze()
