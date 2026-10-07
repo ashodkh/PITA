@@ -108,6 +108,24 @@ def load_calpita_model(config, checkpoint_path, z_grid, transforms):
             kernel_size=(4,4),
             stride=(4,4)
         )
+        encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
+
+    elif config['model']['encoder_name'] == 'ViT':
+        vit_config = config['model']['ViT']
+        encoder = basic_models.SimpleViT(
+            in_channels=config['data']['n_filters'] + int(config['data']['flux_masks'])*config['data']['n_filters'],
+            d_model=vit_config['d_model'],
+            image_size=config['augmentations']['crop_dim'],
+            patch_size=vit_config['patch_size'],
+            nhead=vit_config['nhead'],
+            dim_feedforward=vit_config['dim_feedforward'],
+            num_layers=vit_config['num_layers']
+        )
+        encoder_mlp = basic_models.MLP(
+            input_dim=vit_config['d_model'],
+            hidden_layers=[vit_config['d_model']],
+            output_dim=latent_d
+        )
     else:
         encoder = models.convnext_base(weights=None)
         encoder._modules["features"][0][0] = nn.Conv2d(
@@ -116,7 +134,7 @@ def load_calpita_model(config, checkpoint_path, z_grid, transforms):
             kernel_size=(4,4),
             stride=(4,4)
         )
-    encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
+        encoder_mlp = basic_models.MLP(input_dim=1000, hidden_layers=[512], output_dim=latent_d)
     projection_head = basic_models.MLP(input_dim=latent_d, hidden_layers=[128], output_dim=projection_d)
     color_mlp = basic_models.MLP(input_dim=latent_d, hidden_layers=config['model']['color_mlp_hidden_layers'], output_dim=config['data']['n_filters'])    
     if config['model']['type'] == 'MLP':

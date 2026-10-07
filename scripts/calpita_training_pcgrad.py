@@ -55,17 +55,20 @@ if __name__ == '__main__':
         cde_val[:,:] = 1 / (z_max - z_min)
 
     # these pits are used to calculate the loss function (typical y or output)
-    pit_train = calpit.metrics.probability_integral_transform(
-        cde_train,
-        z_grid,
-        y_train
-    )
+    pit_train = np.clip((y_train - z_min) / (z_max - z_min), 0, 1).astype("float32")
+    pit_val = np.clip((y_val - z_min) / (z_max - z_min), 0, 1).astype("float32")
 
-    pit_val = calpit.metrics.probability_integral_transform(
-        cde_val,
-        z_grid,
-        y_val
-    )
+    # pit_train = calpit.metrics.probability_integral_transform(
+    #     cde_train,
+    #     z_grid,
+    #     y_train
+    # )
+
+    # pit_val = calpit.metrics.probability_integral_transform(
+    #     cde_val,
+    #     z_grid,
+    #     y_val
+    # )
 
     reddening_transform = reddening.ReddeningTransform(R=config['augmentations']['reddening_R'], redden_aug=False)
     if config['augmentations']['gaussian_transform']:
@@ -126,10 +129,10 @@ if __name__ == '__main__':
             output_dim=latent_d
         )
     else:
-        encoder = models.convnext_large(weights=None)
+        encoder = models.convnext_tiny(weights=None)
         encoder._modules["features"][0][0] = nn.Conv2d(
             config['data']['n_filters'] + int(config['data']['flux_masks'])*config['data']['n_filters'],
-            192,
+            96,
             kernel_size=(4,4),
             stride=(4,4)
         )
@@ -165,7 +168,7 @@ if __name__ == '__main__':
         redshift_mlp=redshift_mlp,
         color_mlp=color_mlp,
         loss_type=config['training']['loss_type'],
-        alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),
+        alpha_grid=((z_grid - z_min)/(z_max - z_min)).astype('float32'),
         y_grid=z_grid.astype('float32'),
         cde_init_type=config['data']['cde_init_type'],
         transforms=transforms,
