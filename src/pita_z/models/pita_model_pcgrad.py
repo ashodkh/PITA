@@ -638,18 +638,48 @@ class CalPITALightning(pl.LightningModule):
     def pcgrad_update(grads: list[torch.Tensor]) -> list[torch.Tensor]:
         num_tasks = len(grads)
         modified_grads = [g.clone() for g in grads]
-    
-        for i in range(num_tasks):
-            task_indices = list(range(num_tasks))
-            task_indices.remove(i)
-            random.shuffle(task_indices)  # ← shuffle the order of other tasks
-    
+
+        if num_tasks <= 1:
+            return modified_grads
+
+        distributed = (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+        )
+        rank = torch.distributed.get_rank() if distributed else 0
+        orders = torch.empty(
+            (num_tasks, num_tasks-1),
+            dtype=torch.long,
+            device=grads[0].device,
+        )
+        # Only rank 0 creates random ordering of indices
+        if rank == 0:
+            for i in range(num_tasks):
+                task_indices = [
+                    j for j in range(num_tasks) if j != i
+                ]
+                random.shuffle(task_indices)
+                orders[i] = torch.tensor(
+                    task_indices,
+                    dtype=torch.long,
+                    device=orders.device,
+                )
+
+        # all ranks then share the same random ordering
+        if distributed:
+            torch.distributed.broadcast(orders, src=0)
+
+        # gradient surgery
+        for i, task_indices in enumerate(orders.tolist()):
             for j in task_indices:
-                gi, gj = modified_grads[i], grads[j]
+                gi = modified_grads[i]
+                gj = grads[j]
                 dot = torch.dot(gi, gj)
                 if dot < 0:
-                    modified_grads[i] = gi - (dot / (gj.norm() ** 2 + 1e-8)) * gj
-    
+                    modified_grads[i] = (
+                        gi - (dot / (gj.norm() ** 2 +1e-8)) * gj
+                    )
+
         return modified_grads
         
     @staticmethod

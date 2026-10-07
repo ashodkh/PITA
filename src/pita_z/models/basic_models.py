@@ -263,3 +263,78 @@ class CustomConvNeXt(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+class SimpleViT(nn.Module):
+    """
+    A simple vision Transformer that patchifies images, considers patches as 1D array, and encodes them
+    with a linear layer.
+
+    Arguments
+    ---------
+        - in_channels (int): number of input channels.
+        - d_model (int): dimensionality of transformer latent space.
+        - image_size (int): pixel size of input images.
+        - patch_size (int): pixel size of patches.
+        - n_head (int): number of heads in the attention layer.
+        - dim_feedfowrard (int): hidden dimensionality of MLP in attention layer.
+        - num_layers (int): number of attention layers in series.
+    """
+    def __init__(
+        self,
+        in_channels=6,
+        d_model=256,
+        image_size=36,
+        patch_size=4,
+        nhead=8,
+        dim_feedforward=1024,
+        num_layers=6,
+    ):
+        super().__init__()
+        # 2D convolution does patching + embedding in one go.
+        self.embed = nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=d_model,
+            kernel_size=patch_size,
+            stride=patch_size,
+        )
+
+        n_patches = (image_size // patch_size) ** 2
+
+        # cls_token is what's uses as embedding vector.
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches+1, d_model))
+
+        # this layer contains LayerNorms
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            batch_first=True,
+            norm_first=True
+        )
+
+        self.encoder = nn.TransformerEncoder(
+            layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False,
+        )
+
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        # token sequences of shape (N_batch, d_model, sqrt(n_patches), sqrt(n_patches))
+        x = self.embed(x)
+
+        # Flattened patches of shape (N_batch, n_patches, d_model)
+        x = x.flatten(2).transpose(1,2)
+
+        # N_batch copies of the cls_token.
+        cls = self.cls_token.expand(x.shape[0], -1, -1)
+        # concat to the other tokens to get (N_batch, n_patches+1, d_model)
+        x = torch.cat((x, cls), dim=1)
+
+        x = x + self.pos_embed
+
+        x = self.encoder(x)
+        x = self.norm(x)
+
+        return x[:,0]
