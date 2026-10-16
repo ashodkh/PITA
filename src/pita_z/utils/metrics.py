@@ -27,10 +27,10 @@ def bias_nmad_outliers(y, y_pred, outlier_threshold=0.15, remove_outliers_for_bi
     
     s_outliers = np.abs(delta) > outlier_threshold
     if remove_outliers_for_bias:
-        bias = np.mean(delta[np.logical_not(s_outliers)])
+        bias = np.median(delta[np.logical_not(s_outliers)])
     else:
-        bias = np.mean(delta)
-    nmad = 1.4826*np.median(np.abs(delta - np.median(delta)))
+        bias = np.median(delta)
+    nmad = 1.4826 * np.median(np.abs(delta - np.median(delta)))
     outlier_fraction = np.sum(s_outliers)/len(y)
     
     nmad_err = nmad/np.sqrt(2*len(y))
@@ -51,16 +51,13 @@ def cde_loss(cdes, y_grid, y_true):
     -------
         - CDE loss (float).
     '''
-    y_true_idx = np.argmin(np.abs(y_grid.reshape(-1,1) - y_true.reshape(-1,1).T), axis=0)
-    
-    first_term = []
-    second_term = []
-    
-    for i in range(len(y_true)):
-        first_term.append(np.trapezoid(cdes[i,:]**2,y_grid))
-        second_term.append(cdes[i,y_true_idx[i]])
-    
-    return np.average(first_term) - 2 * np.average(second_term)
+    first_term = np.trapezoid(cdes**2, y_grid, axis=1)
+    second_term = np.array([
+        np.interp(y, y_grid, cde)
+        for y, cde in zip(y_true, cdes)
+    ])
+
+    return first_term.mean() - 2 * second_term.mean()
 
 def ks_from_uniform(pits):
     '''

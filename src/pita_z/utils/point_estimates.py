@@ -1,6 +1,8 @@
 import numpy as np
 from scipy.integrate import simpson
 from scipy.optimize import minimize_scalar
+from scipy.signal import find_peaks
+
 
 def _calculate_best_point_estimate(pdf_vals: np.array, grid: np.array) -> np.array:
     """
@@ -21,8 +23,6 @@ def _calculate_best_point_estimate(pdf_vals: np.array, grid: np.array) -> np.arr
 
     grid = np.array(grid)
 
-    assert isinstance(grid, np.ndarray)
-
     N = pdf_vals.shape[0]
     zx_array = np.zeros(N)
 
@@ -42,3 +42,44 @@ def _calculate_best_point_estimate(pdf_vals: np.array, grid: np.array) -> np.arr
 
     return zx_array
 
+def _calculate_best_point_estimate_better(pdf_vals, grid, gamma=0.15):
+    """
+    Find the minimum-risk redshift for each PDF using grid search
+    followed by local refinement.
+    """
+    grid = np.asarray(grid)
+    zx_array = np.zeros(len(pdf_vals))
+
+    for i, pz in enumerate(pdf_vals):
+
+        def risk(zx):
+            dz = (zx - grid) / (1 + grid)
+            loss = 1 - 1 / (1 + (dz / gamma)**2)
+            return simpson(pz * loss, x=grid)
+
+        # Evaluate risk over the entire redshift grid
+        risk_vals = np.array([risk(z) for z in grid])
+
+        # Identify local minima
+        minima, _ = find_peaks(-risk_vals)
+
+        # Include endpoints
+        candidates = [
+            (risk_vals[0], grid[0]),
+            (risk_vals[-1], grid[-1]),
+        ]
+
+        # Refine every detected local minimum
+        for j in minima:
+            result = minimize_scalar(
+                risk,
+                bounds=(grid[j-1], grid[j+1]),
+                method="bounded",
+            )
+            if result.success:
+                candidates.append((result.fun, result.x))
+
+        # Choose the candidate with the lowest risk
+        zx_array[i] = min(candidates)[1]
+
+    return zx_array

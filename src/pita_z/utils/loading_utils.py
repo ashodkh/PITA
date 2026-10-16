@@ -100,6 +100,8 @@ def load_calpita_model(config, checkpoint_path, z_grid, transforms):
 
     latent_d = config['model']['latent_d']
     projection_d = config['model']['projection_d']
+    z_min = config['initial_cde']['z_min']
+    z_max = config['initial_cde']['z_max']
     if config['model']['encoder_name'] == "convnext_tiny":
         encoder = models.convnext_tiny(weights=None)
         encoder._modules["features"][0][0] = nn.Conv2d(
@@ -158,7 +160,7 @@ def load_calpita_model(config, checkpoint_path, z_grid, transforms):
         redshift_mlp=redshift_mlp,
         color_mlp=color_mlp,
         loss_type=config['training']['loss_type'],
-        alpha_grid=np.linspace(0.001, 0.999, config['training']['n_alphas'], dtype='float32'),
+        alpha_grid=((z_grid - z_min)/(z_max - z_min)).astype('float32'),
         y_grid=z_grid.astype('float32'),
         cde_init_type=config['data']['cde_init_type'],
         transforms=transforms,

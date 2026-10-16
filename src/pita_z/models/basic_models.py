@@ -290,18 +290,23 @@ class SimpleViT(nn.Module):
     ):
         super().__init__()
         # 2D convolution does patching + embedding in one go.
-        self.embed = nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=d_model,
-            kernel_size=patch_size,
-            stride=patch_size,
+        # self.embed = nn.Conv2d(
+        #     in_channels=in_channels,
+        #     out_channels=d_model,
+        #     kernel_size=patch_size,
+        #     stride=patch_size,
+        # )
+        self.embed = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(64, d_model, kernel_size=patch_size, stride=patch_size),
         )
 
         n_patches = (image_size // patch_size) ** 2
 
         # cls_token is what's uses as embedding vector.
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        self.pos_embed = nn.Parameter(torch.zeros(1, n_patches+1, d_model))
+        #self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.pos_embed = nn.Parameter(torch.randn(1, n_patches, d_model) * 0.02)
 
         # this layer contains LayerNorms
         layer = nn.TransformerEncoderLayer(
@@ -328,13 +333,13 @@ class SimpleViT(nn.Module):
         x = x.flatten(2).transpose(1,2)
 
         # N_batch copies of the cls_token.
-        cls = self.cls_token.expand(x.shape[0], -1, -1)
+        #cls = self.cls_token.expand(x.shape[0], -1, -1)
         # concat to the other tokens to get (N_batch, n_patches+1, d_model)
-        x = torch.cat((x, cls), dim=1)
+        #x = torch.cat((cls, x), dim=1)
 
         x = x + self.pos_embed
 
         x = self.encoder(x)
         x = self.norm(x)
 
-        return x[:,0]
+        return x.mean(dim=1) #x[:,0]
