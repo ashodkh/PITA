@@ -1,27 +1,30 @@
 import torch
 from torch import nn
 from torchvision import models
-
+import monotonicnetworks as lmn
 
 class MLP(nn.Module):
     """
     A multi-layer perceptron (MLP) with customizable hidden layers.
     
-    Args:
+    Attributes:
         - input_dim (int): The input dimension to the first fully connected layer (default: 512).
         - hidden_layers (list of int): List specifying the number of units in each hidden layer.
-        
+        - output_dim (int): Output dimensions.
     """
-    def __init__(self, input_dim: int=512, hidden_layers: list=[512,512,128]):
+    def __init__(self, input_dim: int=512, hidden_layers: list=[512,512,128], output_dim=1):
         super().__init__()
-        self.out_features = hidden_layers[-1]
+        self.output_dim = output_dim
         self.projection_layers = nn.ModuleList()
         
         self.projection_layers.append(nn.Linear(input_dim, hidden_layers[0]))
+        self.projection_layers.append(nn.ReLU(inplace=True))
         
         for i in range(1,len(hidden_layers)):
-            self.projection_layers.append(nn.ReLU(inplace=True))
             self.projection_layers.append(nn.Linear(hidden_layers[i-1], hidden_layers[i]))
+            self.projection_layers.append(nn.ReLU(inplace=True))
+
+        self.projection_layers.append(nn.Linear(hidden_layers[-1], output_dim))
         
     def forward(self, x):
         """
@@ -39,17 +42,76 @@ class MLP(nn.Module):
             
         return x  
 
+class LipschitzMLP(nn.Module):
+    '''
+    A multi-layer perceptron (MLP) with customizable hidden layers that is Lipschitz bounded with p=1.
+    
+    Attributes:
+        - input_dim (int): The input dimension to the first fully connected layer (default: 512).
+        - hidden_layers (list of int): List specifying the number of units in each hidden layer.
+        - output_dim (int): Output dimensions.
+    '''
+    def __init__(self, input_dim: int=512, hidden_layers: list=[512,512,128], output_dim=1):
+        super().__init__()
+        self.output_dim = output_dim
+        self.nn_layers = nn.ModuleList()
+        
+        self.nn_layers.append(lmn.LipschitzLinear(input_dim, hidden_layers[0], kind="one-inf"))
+        self.nn_layers.append(lmn.GroupSort(2))
+        
+        for i in range(1,len(hidden_layers)):
+            self.nn_layers.append(lmn.LipschitzLinear(hidden_layers[i-1], hidden_layers[i], kind="inf"))
+            self.nn_layers.append(lmn.GroupSort(2))
+
+
+        self.nn_layers.append(lmn.LipschitzLinear(hidden_layers[-1], output_dim, kind="inf"))
+        
+    def forward(self, x):
+        """
+        Forward pass of the MLP module.
+        
+        Args:
+            - x (Pytorch Tensor): Input tensor.
+        
+        Returns:
+            - Output tensor after passing through the MLP layers.
+            
+        """
+        for layer in self.nn_layers:
+            x = layer(x)
+            
+        return x  
+
+class MonotonicMLP(nn.Module):
+    '''
+    Combines LipschitzMLP with monotonic wrapper and adds sigmoig at the end.
+
+    Attributes:
+        lipschitz_mlp (nn.Module): Lipschitz MLP.
+        monotonic_constraints (list): Specifies which variables will be monotonic.
+        lipschitz_const (float): Lipschitz constant that determines the maximum value of the derivative.
+    '''
+    def __init__(self, lipschitz_mlp, monotonic_constraints, lipschitz_const):
+        super().__init__()
+        self.mono = lmn.MonotonicWrapper(
+            lipschitz_mlp,
+            monotonic_constraints=monotonic_constraints,
+            lipschitz_const=lipschitz_const
+        )
+        
+    def forward(self, x):
+        return torch.sigmoid(0.3 * self.mono(x))    
+    
 class ConvBlock(nn.Module):
     """
     A custom convolutional block with Pytorch that consists of two convolution layers.
     
-    Args:
+    Attributes:
         - in_channels (int): Number of channels in the input.
         - out_channels (int): Number of channels produced by the convolution.
         - kernel_size (int): Size of the convolving kernel (default: 3).
         - stride (int): Stride of the convolution (default: 1).
         - padding (int): Padding added to all four sides of the input (default: 1).
-        
     """
 
     def __init__(self, in_channels: int=None, out_channels: int=None,
@@ -81,12 +143,11 @@ class ConvBlock(nn.Module):
         """
         Defines the forward pass through the convolutional block.
         
-        Args:
+        Attributes:
             - x (Pytroch Tensor): Input image.
         
         Returns:
             - Pytorch Tensor with out_channels channels.
-            
         """
         input_x = x
         out = self.conv1(x)
@@ -103,11 +164,10 @@ class JointBlocks(nn.Module):
     """
     A PyTorch module that combines multiple convolutional blocks and average pooling layers.
     
-    Args:
+    Attributes:
         - input_channels (int): Number of input channels for the first convolutional block (default: 32).
         - block_channels (list of int): List specifying the output channels for each convolutional block.
-        - avg_pooling_layers (list of int): List specifying the kernel size for each average pooling layer.
-        
+        - avg_pooling_layers (list of int): List specifying the kernel size for each average pooling layer.  
     """
     def __init__(self, input_channels: int=32, block_channels: list=[32,64,128], avg_pooling_layers: list=[2,2,4]):
         super().__init__()
@@ -150,11 +210,10 @@ class Encoder(nn.Module):
     """
     A PyTorch encoder module that applies an initial convolution layer followed by joint blocks.
     
-    Args:
+    Attributes:
         - input_channels (int): Number of input channels (default: 4).
         - first_layer_output_channels (int): Number of output channels after the first convolution (default: 32).
         - joint_blocks (nn.Module): A module containing several convolutional blocks.
-        
     """
         
     def __init__(self, input_channels: int=4, first_layer_output_channels: int=32, joint_blocks: nn.Module=None):
@@ -204,3 +263,83 @@ class CustomConvNeXt(nn.Module):
     def forward(self, x):
         return self.model(x)
 
+class SimpleViT(nn.Module):
+    """
+    A simple vision Transformer that patchifies images, considers patches as 1D array, and encodes them
+    with a linear layer.
+
+    Arguments
+    ---------
+        - in_channels (int): number of input channels.
+        - d_model (int): dimensionality of transformer latent space.
+        - image_size (int): pixel size of input images.
+        - patch_size (int): pixel size of patches.
+        - n_head (int): number of heads in the attention layer.
+        - dim_feedfowrard (int): hidden dimensionality of MLP in attention layer.
+        - num_layers (int): number of attention layers in series.
+    """
+    def __init__(
+        self,
+        in_channels=6,
+        d_model=256,
+        image_size=36,
+        patch_size=4,
+        nhead=8,
+        dim_feedforward=1024,
+        num_layers=6,
+    ):
+        super().__init__()
+        # 2D convolution does patching + embedding in one go.
+        # self.embed = nn.Conv2d(
+        #     in_channels=in_channels,
+        #     out_channels=d_model,
+        #     kernel_size=patch_size,
+        #     stride=patch_size,
+        # )
+        self.embed = nn.Sequential(
+            nn.Conv2d(in_channels, 64, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(64, d_model, kernel_size=patch_size, stride=patch_size),
+        )
+
+        n_patches = (image_size // patch_size) ** 2
+
+        # cls_token is what's uses as embedding vector.
+        #self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
+        self.pos_embed = nn.Parameter(torch.randn(1, n_patches, d_model) * 0.02)
+
+        # this layer contains LayerNorms
+        layer = nn.TransformerEncoderLayer(
+            d_model=d_model,
+            nhead=nhead,
+            dim_feedforward=dim_feedforward,
+            batch_first=True,
+            norm_first=True
+        )
+
+        self.encoder = nn.TransformerEncoder(
+            layer,
+            num_layers=num_layers,
+            enable_nested_tensor=False,
+        )
+
+        self.norm = nn.LayerNorm(d_model)
+
+    def forward(self, x):
+        # token sequences of shape (N_batch, d_model, sqrt(n_patches), sqrt(n_patches))
+        x = self.embed(x)
+
+        # Flattened patches of shape (N_batch, n_patches, d_model)
+        x = x.flatten(2).transpose(1,2)
+
+        # N_batch copies of the cls_token.
+        #cls = self.cls_token.expand(x.shape[0], -1, -1)
+        # concat to the other tokens to get (N_batch, n_patches+1, d_model)
+        #x = torch.cat((cls, x), dim=1)
+
+        x = x + self.pos_embed
+
+        x = self.encoder(x)
+        x = self.norm(x)
+
+        return x.mean(dim=1) #x[:,0]

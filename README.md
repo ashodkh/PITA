@@ -1,8 +1,8 @@
-This repo contains the Pytorch Lightning implementation of PITA (Photo-z Inference with a Triple-loss Algorithm). https://www.arxiv.org/abs/2602.10207.
+This repo contains the PyTorch Lightning implementation of PITA (Photo-z Inference with a Triple-loss Algorithm) and Cal-PITA (Calibrated PITA). PITA is a semi-supervised, image-based photometric redshift (photo-z) algorithm.
+It combines contrastive learning with color and redshift prediction losses, enabling simultaneous training with both unlabeled and labeled data. PITA outputs redshift point estimates.
+Cal-PITA is similar to PITA, but outputs locally calibrated redshift probability distribution functions, and it is based on [calpit](https://github.com/lee-group-cmu/Cal-PIT), which is a Python package for diagnosing and recalibrating conditional density estimates.
 
-PITA is a semi-supervised, image-based photometric redshift (photo-z) algorithm. It combines contrastive learning with color and redshift prediction losses, enabling simultaneous training with both unlabeled and labeled data.
-
-<img width="1466" height="818" alt="semi_supervised_arch_new" src="https://github.com/user-attachments/assets/0aa5d73d-58e1-469b-83c5-9961d9320fcc" />
+<img width="1246" height="670" alt="calpita_arch" src="https://github.com/user-attachments/assets/8303c20b-3dc5-4a28-b87b-105650873c70" />
 
 In our paper (https://www.arxiv.org/abs/2602.10207), we show that PITA outperforms traditional ML and fully-supervised CNN methods on HST [CANDELS survey](https://www.ipac.caltech.edu/project/candels) galaxies out to z ~ 3. 
 

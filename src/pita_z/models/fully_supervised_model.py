@@ -1,18 +1,36 @@
 import pytorch_lightning as pl
 import torch
 from pita_z.utils.lr_schedulers import WarmupCosineAnnealingScheduler, WarmupCosine
+from pita_z.utils.metrics import ks_from_uniform
+from calpit.utils import trapz_grid_torch
+from scipy.interpolate import PchipInterpolator
+import numpy as np
 
 class CNNPhotoz(pl.LightningModule):
     """
     A PyTorch Lightning module for CNN photo-z.
 
-    Args:
+    Attributes:
         encoder (nn.Module): A CNN encoder.
         encoder_mlp (nn.Module, optional): An optional MLP that projects encoder outputs to a lower dimension.
         redshift_mlp (nn.Module): The final MLP for redshift prediction.
         lr (float): Learning rate for the optimizer.
         transforms (callable): Optional image augmentations. 
         lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
+
+        cosine_T_max (int): Number of epochs for cosine annealing cycle. Defaults to 500.
+        cosine_eta_min (float): Minimum LR for cosine scheduler. Defaults to 1e-6.
+
+        multistep_milestones (list[int]): Epochs at which to decay LR. Defaults to [1500].
+        multistep_gamma (float): Multiplicative LR decay factor. Defaults to 0.1.
+
+        warmupcosine_warmup_epochs (int): Number of warmup epochs. Defaults to 200.
+        warmupcosine_half_period (int): Half-period of cosine cycle in epochs. Defaults to 900.
+        warmupcosine_min_lr (float): Minimum LR after decay. Defaults to 1e-6.
+
+        wc_ann_warmup_epochs (int): Number of warmup epochs for annealed schedule. Defaults to 200.
+        wc_ann_half_period (int): Half-period of annealed cosine cycle. Defaults to 900.
+        wc_ann_min_lr (float): Minimum LR for annealed schedule. Defaults to 1e-6.
     """
     
     def __init__(
@@ -138,6 +156,513 @@ class CNNPhotoz(pl.LightningModule):
         bias = torch.mean(delta)
         nmad = 1.4826*torch.median(torch.abs(delta-torch.median(delta)))
         outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(batch_redshifts)
+        
+        self.log('val_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
+        self.log('val_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)
+        self.log('val_outlier_f', outlier_fraction, on_step=True, on_epoch=True, sync_dist=True)
+        
+        return loss
+    
+    def configure_optimizers(self):
+        optim = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-05)
+
+        if self.lr_scheduler == 'multistep':
+            lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                optimizer=optim,
+                milestones=self.multistep_milestones,
+                gamma=self.multistep_gamma
+            )
+            
+        if self.lr_scheduler == 'cosine':
+            lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer=optim,
+                T_max=self.cosine_T_max,
+                eta_min=self.cosine_eta_min
+            )
+
+        if self.lr_scheduler == 'warmupcosine':
+            lr_scheduler = WarmupCosine(
+                optimizer=optim,
+                warmup_epochs=self.warmupcosine_warmup_epochs,
+                cos_half_period=self.warmupcosine_half_period,
+                min_lr=self.warmupcosine_min_lr
+            )
+
+        if self.lr_scheduler == 'wc_ann':
+            lr_scheduler = WarmupCosineAnnealingScheduler(
+                optimizer=optim,
+                warmup_epochs=self.wc_ann_warmup_epochs,
+                cos_half_period=self.wc_ann_half_period,
+                min_lr=self.wc_ann_min_lr
+            )
+
+        if self.lr_scheduler is None:
+            return optim
+        else:
+            return [optim], [lr_scheduler]
+
+class CalpitPhotometryLightning(pl.LightningModule):
+    """
+    A PyTorch Lightning module for Cal-PIT with photometry.
+
+    Attributes:
+        model (nn.module): Model that learns regression from features to PIT.
+        loss_type (str): Specifics loss function.
+        alpha_grid (np.array): Grid of PIT values [0,1] that is used to calculate validation loss.
+        y_grid (np.array): Grid of y variable (redshift) on which CDEs are calculated.
+        cde_init_type (str): Specifics initial CDE guess.
+        lr (float): Learning rate for the optimizer.
+        lamda (float): scaling factor for negative gradient (monotonicity) loss.
+        lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
+
+        cosine_T_max (int): Number of epochs for cosine annealing cycle. Defaults to 500.
+        cosine_eta_min (float): Minimum LR for cosine scheduler. Defaults to 1e-6.
+
+        multistep_milestones (list[int]): Epochs at which to decay LR. Defaults to [1500].
+        multistep_gamma (float): Multiplicative LR decay factor. Defaults to 0.1.
+
+        warmupcosine_warmup_epochs (int): Number of warmup epochs. Defaults to 200.
+        warmupcosine_half_period (int): Half-period of cosine cycle in epochs. Defaults to 900.
+        warmupcosine_min_lr (float): Minimum LR after decay. Defaults to 1e-6.
+
+        wc_ann_warmup_epochs (int): Number of warmup epochs for annealed schedule. Defaults to 200.
+        wc_ann_half_period (int): Half-period of annealed cosine cycle. Defaults to 900.
+        wc_ann_min_lr (float): Minimum LR for annealed schedule. Defaults to 1e-6.
+    """
+    def __init__(
+        self,
+        model=None,
+        loss_type='bce',
+        alpha_grid=None,
+        y_grid=None,
+        cde_init_type='uniform',
+        lr=None,
+        lamda=1,
+        lr_scheduler=None,
+        
+        # cosine lr params
+        cosine_T_max=500,
+        cosine_eta_min=1e-6,
+
+        # multistep lr params
+        multistep_milestones=[1500],
+        multistep_gamma=0.1,
+
+        # warmupcosine lr params
+        warmupcosine_warmup_epochs=200,
+        warmupcosine_half_period=900,
+        warmupcosine_min_lr=1e-6,
+
+        #wc_ann lr params
+        wc_ann_warmup_epochs=200,
+        wc_ann_half_period=900,
+        wc_ann_min_lr=1e-6
+    ):
+        super().__init__()
+        self.model = model
+        self.loss_type = loss_type
+        self.register_buffer("alpha_grid", torch.as_tensor(alpha_grid, dtype=torch.float32))
+        self.register_buffer("y_grid", torch.as_tensor(y_grid, dtype=torch.float32))
+        self.lr = lr
+        self.lamda = lamda
+        self.lr_scheduler = lr_scheduler
+        self.cosine_T_max = cosine_T_max
+        self.cosine_eta_min = cosine_eta_min
+        self.multistep_milestones = multistep_milestones
+        self.multistep_gamma = multistep_gamma
+        self.warmupcosine_warmup_epochs = warmupcosine_warmup_epochs
+        self.warmupcosine_half_period = warmupcosine_half_period
+        self.warmupcosine_min_lr = warmupcosine_min_lr
+        self.wc_ann_warmup_epochs = wc_ann_warmup_epochs
+        self.wc_ann_half_period = wc_ann_half_period
+        self.wc_ann_min_lr = wc_ann_min_lr
+
+    def forward(self, alphas=None, x=None):
+        if alphas is not None:
+            features = torch.hstack([alphas, x])
+            return self.model(features)
+        else:
+            return self.model(x)
+
+    def transform(self, x, cde_init, y_grid=None):
+        """
+        Transforms the initial CDE guesses to the calibrated CDEs.
+        """
+        if y_grid is None:
+            y_grid = self.y_grid
+        # Making an array of initial CDEs
+        cdf_init = trapz_grid_torch(cde_init, y_grid)
+        # Initial CDFs are the initial PIT guesses
+        features = torch.cat(
+            [
+                torch.ravel(cdf_init)[:,None],
+                torch.repeat_interleave(x, cdf_init.shape[1], dim=0)
+            ],
+            dim = -1
+        )
+        # Given x and initial PIT guess, the model predicts what the PIT should be.
+        # This PIT on the y-grid is actually the true CDF (if regression is working).
+        cdf_new = self.forward(alphas=None, x=features.float()).reshape((x.shape[0], len(y_grid)))
+
+        # Interpolating the predicted CDF, whose derivative is the CDE.
+        cdf_new_funct = PchipInterpolator(y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
+        pdf_func = cdf_new_funct.derivative(1)
+        cde_new = pdf_func(y_grid.detach().cpu())
+        return torch.tensor(cde_new, device=x.device)
+        
+    def loss_fn(self, predictions, truths):
+        if self.loss_type in ('bce', 'monotonic_bce'):
+            loss = torch.nn.BCELoss(reduction='mean')
+            return loss(predictions, truths)
+
+    @staticmethod
+    def monotonicity_loss(output, x_mono):
+        grad = torch.autograd.grad(
+            outputs=output,
+            inputs=x_mono,
+            grad_outputs=torch.ones_like(output),
+            create_graph=True
+        )[0]
+
+        return torch.relu(-grad).mean()
+        
+        
+    def training_step(self, batch, batch_idx):
+        x, y, true_redshifts, init_cdes = batch
+        n_batch = x.shape[0]
+        alphas = torch.rand(n_batch, 1, device=x.device).requires_grad_(True)
+        # Calculating the binary variable W. Mean of W is the true PIT.
+        y = (y <= alphas.squeeze()).float()
+
+        outputs = self.forward(alphas=alphas, x=x)
+        loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
+        if self.loss_type == 'monotonic_bce':
+            loss += self.lamda * self.monotonicity_loss(outputs, alphas)
+        self.log("training_loss", loss, on_epoch=True, sync_dist=True)
+
+        # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
+        batch_cdes = self.transform(x, init_cdes)
+        max_idxs = torch.argmax(batch_cdes, axis=1)
+        max_ys = self.y_grid[max_idxs]
+        
+        delta = (max_ys - true_redshifts) / (1 + true_redshifts)
+        bias = torch.mean(delta)
+        nmad = 1.4826*torch.median(torch.abs(delta-torch.median(delta)))
+        outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(true_redshifts)
+        
+        self.log('training_bias', bias, on_epoch=True, sync_dist=True)
+        self.log('training_nmad', nmad, on_epoch=True, sync_dist=True)
+        self.log('training_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
+        
+        return loss
+        
+    def validation_step(self, batch, batch_idx):
+        x, y, true_redshifts, init_cdes = batch
+        x_device = x.device
+        n_batch = x.shape[0]
+        n_alphas = len(self.alpha_grid)
+        # Validation is done on the whole range [0,1] of PIT.
+        features = torch.cat(
+            [
+                torch.repeat_interleave(self.alpha_grid, n_batch)[:,None],
+                torch.tile(x, (n_alphas,1))
+            ],
+            dim = -1
+        )
+        y = (torch.tile(y, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid, n_batch)).float()
+
+        outputs = self.forward(alphas=None, x=features)
+
+        loss = self.loss_fn(torch.squeeze(outputs), torch.squeeze(y))
+        # if self.loss_type == 'monotonic_bce':
+        #     loss += self.lamda * self.monotonicity_loss(outputs, features[:,0:1])
+        self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
+
+        # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
+        batch_cdes = self.transform(x, init_cdes)
+        max_idxs = torch.argmax(batch_cdes, axis=1)
+        max_ys = self.y_grid[max_idxs]
+
+        #batch_cdfs = torch.cumsum(batch_cdes, axis=1) * (self.y_grid[1] - self.y_grid[0])
+        #z_ref_idxs = torch.searchsorted(self.y_grid, true_redshifts)
+        #z_ref_idxs[z_ref_idxs == len(self.y_grid)] = len(self.y_grid) - 1
+        #batch_pits = batch_cdfs[torch.arange(len(batch_cdfs)),z_ref_idxs]
+        
+        delta = (max_ys - true_redshifts) / (1 + true_redshifts)
+        bias = torch.mean(delta)
+        nmad = 1.4826*torch.median(torch.abs(delta-torch.median(delta)))
+        outlier_fraction = torch.sum(torch.abs(delta)>0.15)/len(true_redshifts)
+        
+        self.log('val_bias', bias, on_epoch=True, sync_dist=True)
+        self.log('val_nmad', nmad, on_epoch=True, sync_dist=True)
+        self.log('val_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
+        #self.log('val_pits', ks_from_uniform(batch_pits, absolute=False), on_epoch=True, sync_dist=True)
+        
+        return loss
+        
+    def configure_optimizers(self):
+        optim = torch.optim.Adam(self.parameters(), lr=self.lr, weight_decay=1e-05)
+
+        if self.lr_scheduler == 'multistep':
+            lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+                optimizer=optim,
+                milestones=self.multistep_milestones,
+                gamma=self.multistep_gamma
+            )
+            
+        if self.lr_scheduler == 'cosine':
+            lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+                optimizer=optim,
+                T_max=self.cosine_T_max,
+                eta_min=self.cosine_eta_min
+            )
+
+        if self.lr_scheduler == 'warmupcosine':
+            lr_scheduler = WarmupCosine(
+                optimizer=optim,
+                warmup_epochs=self.warmupcosine_warmup_epochs,
+                cos_half_period=self.warmupcosine_half_period,
+                min_lr=self.warmupcosine_min_lr
+            )
+
+        if self.lr_scheduler == 'wc_ann':
+            lr_scheduler = WarmupCosineAnnealingScheduler(
+                optimizer=optim,
+                warmup_epochs=self.wc_ann_warmup_epochs,
+                cos_half_period=self.wc_ann_half_period,
+                min_lr=self.wc_ann_min_lr
+            )
+
+        if self.lr_scheduler is None:
+            return optim
+        else:
+            return [optim], [lr_scheduler]
+                
+
+class CalpitCNNPhotoz(pl.LightningModule):
+    """
+    A PyTorch Lightning module for Calpit CNN photo-z.
+
+    Attributes:
+        encoder (nn.Module): A CNN encoder.
+        encoder_mlp (nn.Module, optional): An optional MLP that projects encoder outputs to a lower dimension.
+        redshift_mlp (nn.Module): The final MLP for redshift prediction.
+        loss_type (string): Calpit loss type. Default is binary cross-entropy.
+        alpha_grid (np.ndarray or torch.tensor): Fixed grid of alpha's to calculate validation loss.
+        y_grid (np.ndarray or torch.tensor): Grid of y-values on which pdfs are calculated.
+        cde_init_type (string): Initial cde guess. Defaults to uniform.
+        transforms (callable): Optional image augmentations.
+        transforms_val (callable): Optional image augmentations for the validation set.
+        lr (float): Learning rate for the optimizer.
+        lamda (float): scaling factor for negative gradient (monotonicity) loss.
+        lr_scheduler: Type of lr scheduler. Options are: multistep, cosine, warmupcosine, and wc_ann. 
+
+        cosine_T_max (int): Number of epochs for cosine annealing cycle. Defaults to 500.
+        cosine_eta_min (float): Minimum LR for cosine scheduler. Defaults to 1e-6.
+
+        multistep_milestones (list[int]): Epochs at which to decay LR. Defaults to [1500].
+        multistep_gamma (float): Multiplicative LR decay factor. Defaults to 0.1.
+
+        warmupcosine_warmup_epochs (int): Number of warmup epochs. Defaults to 200.
+        warmupcosine_half_period (int): Half-period of cosine cycle in epochs. Defaults to 900.
+        warmupcosine_min_lr (float): Minimum LR after decay. Defaults to 1e-6.
+
+        wc_ann_warmup_epochs (int): Number of warmup epochs for annealed schedule. Defaults to 200.
+        wc_ann_half_period (int): Half-period of annealed cosine cycle. Defaults to 900.
+        wc_ann_min_lr (float): Minimum LR for annealed schedule. Defaults to 1e-6.
+    """
+    
+    def __init__(
+        self,
+        encoder: torch.nn.Module=None,
+        encoder_mlp: torch.nn.Module=None,
+        redshift_mlp: torch.nn.Module=None,
+        loss_type='bce',
+        alpha_grid=None,
+        y_grid=None,
+        cde_init_type='uniform',
+        transforms=None,
+        transforms_val=None,
+        lr=None,
+        lamda=1,
+        lr_scheduler=None,
+
+        # cosine lr params
+        cosine_T_max=500,
+        cosine_eta_min=1e-6,
+
+        # multistep lr params
+        multistep_milestones=[1500],
+        multistep_gamma=0.1,
+
+        # warmupcosine lr params
+        warmupcosine_warmup_epochs=200,
+        warmupcosine_half_period=900,
+        warmupcosine_min_lr=1e-6,
+
+        #wc_ann lr params
+        wc_ann_warmup_epochs=200,
+        wc_ann_half_period=900,
+        wc_ann_min_lr=1e-6
+    ):
+        super().__init__()
+        self.encoder = encoder
+        self.encoder_mlp = encoder_mlp
+        self.redshift_mlp = redshift_mlp
+        self.loss_type = loss_type
+        self.register_buffer("alpha_grid", torch.as_tensor(alpha_grid, dtype=torch.float32))
+        self.register_buffer("y_grid", torch.as_tensor(y_grid, dtype=torch.float32))
+        if cde_init_type == 'uniform':
+            self.register_buffer("cde_init", torch.full((len(y_grid),), 1/(y_grid[-1]-y_grid[0]), dtype=torch.float32))
+        self.transforms = transforms
+        self.transforms_val = transforms_val
+        self.lr = lr
+        self.lamda = lamda
+        self.lr_scheduler = lr_scheduler
+        self.cosine_T_max = cosine_T_max
+        self.cosine_eta_min = cosine_eta_min
+        self.multistep_milestones = multistep_milestones
+        self.multistep_gamma = multistep_gamma
+        self.warmupcosine_warmup_epochs = warmupcosine_warmup_epochs
+        self.warmupcosine_half_period = warmupcosine_half_period
+        self.warmupcosine_min_lr = warmupcosine_min_lr
+        self.wc_ann_warmup_epochs = wc_ann_warmup_epochs
+        self.wc_ann_half_period = wc_ann_half_period
+        self.wc_ann_min_lr = wc_ann_min_lr
+        
+    def forward(self, x, goal='train'):
+        """
+        Forward pass through the encoder and MLPs.
+        If goal is 'train', then a random alpha is generated and concatenated to the latent vector.
+        If goal is to 'validate', then alpha_grid is concatenated to the latent vector.
+        """
+        x = self.encoder(x)
+        x = self.encoder_mlp(x)
+        n_batch = x.shape[0]
+        if goal == 'train':
+            alphas = torch.rand(n_batch, 1, device=x.device).requires_grad_(True)
+            x = torch.hstack([alphas, x])
+            x = self.redshift_mlp(x)
+            return x, alphas
+        elif goal == 'validate':
+            n_alphas = len(self.alpha_grid)
+            x = torch.cat(
+                [
+                    torch.repeat_interleave(self.alpha_grid, n_batch)[:,None],
+                    torch.tile(x, (n_alphas,1))
+                ],
+                dim=-1
+            )
+            x = self.redshift_mlp(x)
+            return x, None
+
+    @torch.no_grad()
+    def transform_cde(self, x):
+        """
+        Transforms the input CDEs to the calibrated CDEs.
+        """        
+        # Making an array of initial CDEs
+        cde_init = torch.tile(self.cde_init, (x.shape[0],1))
+        cdf_init = trapz_grid_torch(cde_init, self.y_grid)
+        # Initial CDFs are the initial PIT guesses. 
+        # The PIT guesses are concatenated to latent vectors.
+        features = self.encoder_mlp(self.encoder(x))
+        features = torch.cat(
+            [
+                torch.ravel(cdf_init)[:,None],
+                torch.repeat_interleave(features, cdf_init.shape[1], dim=0)
+            ],
+            dim = -1
+        )
+        # Given latent vectors and initial PIT guess, the model predicts what the PIT should be.
+        # This PIT on the y-grid is actually the true CDF (if regression is working).
+        cdf_new = self.redshift_mlp(features.float()).reshape((x.shape[0], len(self.y_grid)))
+        # Interpolating the predicted CDF, whose derivative is the CDE.
+        cdf_new_funct = PchipInterpolator(self.y_grid.detach().cpu(), cdf_new.detach().cpu(), extrapolate=True, axis=1)
+        pdf_func = cdf_new_funct.derivative(1)
+        cde_new = pdf_func(self.y_grid.detach().cpu())
+        return torch.tensor(cde_new, device=x.device)
+
+    def loss_fn(self, predictions, truths):
+        if self.loss_type in ('bce', 'monotonic_bce'):
+            loss = torch.nn.BCELoss(reduction='mean')
+            return loss(predictions, truths)
+
+    @staticmethod
+    def monotonicity_loss(output, x_mono):
+        grad = torch.autograd.grad(
+            outputs=output,
+            inputs=x_mono,
+            grad_outputs=torch.ones_like(output),
+            create_graph=True
+        )[0]
+
+        return torch.relu(-grad).mean()
+        
+    def training_step(self, batch_data, batch_idx):
+        """
+        Training step: processes the batch, computes the loss, and logs metrics.
+        """
+        batch_images, batch_pits, batch_redshifts, batch_redshift_weights, _ = batch_data
+
+        if self.transforms:
+            batch_images = self.transforms(batch_images)
+
+        # alphas (PITs) are concatenated to the latent vectors.
+        # To do so, they are generated randomly in the forward function (if goal='Train').
+        # forward function also returns these random alphas to calculate true W (binary PIT variable) and loss.
+        batch_predictions, alphas = self.forward(batch_images, goal='train')
+        y = (batch_pits <= alphas.squeeze()).float()
+        loss = self.loss_fn(batch_predictions.squeeze(), torch.squeeze(y))
+        if self.loss_type == 'monotonic_bce':
+            loss += self.lamda * self.monotonicity_loss(batch_predictions, alphas)
+        
+        self.log("training_loss", loss, on_epoch=True, sync_dist=True)
+        
+        # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
+        batch_cdes = self.transform_cde(batch_images)
+        max_idxs = torch.argmax(batch_cdes, axis=1)
+        max_ys = self.y_grid[max_idxs]
+        
+        delta = (max_ys - batch_redshifts) / (1 + batch_redshifts)
+        bias = torch.mean(delta)
+        nmad = 1.4826 * torch.median(torch.abs(delta-torch.median(delta)))
+        outlier_fraction = torch.sum(torch.abs(delta)>0.15) / len(batch_redshifts)
+        
+        self.log('training_bias', bias, on_epoch=True, sync_dist=True)
+        self.log('training_nmad', nmad, on_epoch=True, sync_dist=True)
+        self.log('training_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
+        
+        return loss
+        
+    def validation_step(self, batch_data, batch_idx):
+        """
+        Same as training step but for validation data.
+        """
+        batch_images, batch_pits, batch_redshifts, batch_redshift_weights, _ = batch_data
+        
+        if self.transforms_val:
+            batch_images = self.transforms_val(batch_images)
+
+        # Validation is done on the whole range [0,1] of PIT.
+        # So they don't need to be generated in the forward function (goal='validate').
+        batch_predictions, _ = self.forward(batch_images, goal='validate')
+        n_batch = batch_images.shape[0]
+        n_alphas = len(self.alpha_grid)
+        y = (torch.tile(batch_pits, (n_alphas,)) <= torch.repeat_interleave(self.alpha_grid, n_batch)).float()
+        
+        loss = self.loss_fn(batch_predictions.squeeze(), torch.squeeze(y))
+        self.log("val_loss", loss, on_step=True, on_epoch=True, sync_dist=True)
+
+        # Compute metrics (bias, NMAD, and outlier fraction) using CDE mode and log them
+        batch_cdes = self.transform_cde(batch_images)
+        max_idxs = torch.argmax(batch_cdes, axis=1)
+        max_ys = self.y_grid[max_idxs]
+        
+        delta = (max_ys - batch_redshifts) / (1 + batch_redshifts)
+        bias = torch.mean(delta)
+        nmad = 1.4826 * torch.median(torch.abs(delta-torch.median(delta)))
+        outlier_fraction = torch.sum(torch.abs(delta)>0.15) / len(batch_redshifts)
         
         self.log('val_bias', bias, on_step=True, on_epoch=True, sync_dist=True)
         self.log('val_nmad', nmad, on_step=True, on_epoch=True, sync_dist=True)

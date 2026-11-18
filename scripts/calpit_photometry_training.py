@@ -1,0 +1,129 @@
+import numpy as np
+import pytorch_lightning as pl
+from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor, DeviceStatsMonitor
+from lightning.pytorch import loggers as pl_loggers
+import yaml
+import argparse
+import calpit
+import h5py
+
+# import custom modules
+from pita_z.data_modules import data_modules
+from pita_z.models import fully_supervised_model
+from pita_z.models import basic_models
+
+parser = argparse.ArgumentParser()
+parser.add_argument('config_file', type=str)
+parser.add_argument('run', type=int)
+args = parser.parse_args()
+
+config_file = args.config_file
+config_dir = '/global/homes/a/ashodkh/rubin_dp2/configs/'
+with open(config_dir + f"{config_file}.yaml", "r") as f:
+    config = yaml.safe_load(f)
+run = args.run
+
+if __name__ == '__main__':
+    ## prepping data
+    path_train = config['data']['path_train']
+    path_val = config['data']['path_val']
+
+    # defining a grid of redshifts
+    z_min = config['initial_cde']['z_min']
+    z_max = config['initial_cde']['z_max']
+    n_grid = config['initial_cde']['n_grid']
+    z_grid = np.linspace(z_min, z_max, n_grid, dtype='float32')
+    init_cde_type = config['initial_cde']['type']
+    data_module = data_modules.CalpitPhotometryDataModule(
+        path_train=path_train,
+        path_val=path_val,
+        init_cde_path_train=config['initial_cde'][init_cde_type]['init_cde_path_train'],
+        init_cde_path_val=config['initial_cde'][init_cde_type]['init_cde_path_val'],
+        init_cde_type=init_cde_type,
+        feature_name=config['data']['feature_name'],
+        feature_idxs=config['data']['feature_idxs'],
+        scaler_path=None,
+        batch_size=config['data']['batch_size'],
+        num_workers=config['data']['num_workers'],
+        y_grid=z_grid,
+    )
+     
+    ## prepping model
+    if config['model']['type'] == 'MLP':
+        model = calpit.nn.models.MLP(
+            config['data']['n_features'] + 1, # photometric features + 1 alpha
+            config['model']['hidden_layers']
+        )
+    elif config['model']['type'] == 'MonotonicMLP':
+        lipschitz_mlp = basic_models.LipschitzMLP(
+            config['data']['n_features'] + 1, # photometric features + 1 alpha
+            config['model']['hidden_layers']
+        )
+        model = basic_models.MonotonicMLP(
+            lipschitz_mlp,
+            monotonic_constraints=[1,0,0,0,0],
+            lipschitz_const=config['model']['lipschitz_const'],
+        )
+    elif config['model']['type'] == 'UMNN':
+        model = calpit.nn.umnn.MonotonicNN(
+            config['data']['n_features'] + 1,
+            config['model']['hidden_layers'],
+            sigmoid=True
+        )
+        
+
+    # Various learning rate schedulers can be used. Set in the config file.
+    lr_scheduler_config = config['training']['lr_scheduler']
+    scheduler_type = lr_scheduler_config['type']
+    scheduler_params = lr_scheduler_config[scheduler_type] if scheduler_type else None
+    scheduler_kwargs = (
+        {f"{scheduler_type}_{k}": v for k, v in scheduler_params.items()}
+        if scheduler_type
+        else {}
+    )
+        
+    pl_model = fully_supervised_model.CalpitPhotometryLightning(
+        model=model,
+        loss_type=config['training']['loss_type'],
+        alpha_grid=np.linspace(0, 1, config['training']['n_alphas'], dtype='float32'),
+        y_grid=z_grid.astype('float32'),
+        lr=config['training']['learning_rate'],
+        lamda=config['training']['lamda'],
+        lr_scheduler=scheduler_type,
+        **scheduler_kwargs
+    )
+    
+    checkpoint_filename = f'candels_{config_file}_run{run}_'+'{epoch}'
+
+    # saving models during training
+    checkpoint_callback = ModelCheckpoint(
+        #monitor='epoch',
+        #mode='max',
+        dirpath=config['logging_and_checkpoint']['dir_checkpoint'],
+        filename=checkpoint_filename,
+        every_n_epochs=config['logging_and_checkpoint']['every_n_epochs'],
+        save_top_k=-1,
+        enable_version_counter=False
+    )
+    
+    lr_monitor_callback = LearningRateMonitor(logging_interval='epoch')
+
+    tb_logger = pl_loggers.TensorBoardLogger(
+        save_dir=config['logging_and_checkpoint']['dir_log'],
+        name=f'candels_{config_file}_run{run}'
+    )
+
+    trainer = pl.Trainer(
+        accelerator='gpu', 
+        devices=4,
+        min_epochs=1,
+        max_epochs=config['training']['epochs'],
+        precision='32',
+        log_every_n_steps=1,
+        default_root_dir="/global/homes/a/ashodkh/rubin_dp2/scripts",
+        strategy='ddp',
+        logger=tb_logger,
+        enable_progress_bar=False,
+        callbacks=[checkpoint_callback, lr_monitor_callback],
+    )
+    trainer.fit(pl_model, data_module)
