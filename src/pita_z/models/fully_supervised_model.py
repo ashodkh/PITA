@@ -383,10 +383,10 @@ class CalpitPhotometryLightning(pl.LightningModule):
         max_idxs = torch.argmax(batch_cdes, axis=1)
         max_ys = self.y_grid[max_idxs]
 
-        batch_cdfs = torch.cumsum(batch_cdes, axis=1) * (self.y_grid[1] - self.y_grid[0])
-        z_ref_idxs = torch.searchsorted(self.y_grid, true_redshifts)
-        z_ref_idxs[z_ref_idxs == len(self.y_grid)] = len(self.y_grid) - 1
-        batch_pits = batch_cdfs[torch.arange(len(batch_cdfs)),z_ref_idxs]
+        #batch_cdfs = torch.cumsum(batch_cdes, axis=1) * (self.y_grid[1] - self.y_grid[0])
+        #z_ref_idxs = torch.searchsorted(self.y_grid, true_redshifts)
+        #z_ref_idxs[z_ref_idxs == len(self.y_grid)] = len(self.y_grid) - 1
+        #batch_pits = batch_cdfs[torch.arange(len(batch_cdfs)),z_ref_idxs]
         
         delta = (max_ys - true_redshifts) / (1 + true_redshifts)
         bias = torch.mean(delta)
@@ -396,7 +396,7 @@ class CalpitPhotometryLightning(pl.LightningModule):
         self.log('val_bias', bias, on_epoch=True, sync_dist=True)
         self.log('val_nmad', nmad, on_epoch=True, sync_dist=True)
         self.log('val_outlier_f', outlier_fraction, on_epoch=True, sync_dist=True)
-        self.log('val_pits', ks_from_uniform(batch_pits, absolute=False), on_epoch=True, sync_dist=True)
+        #self.log('val_pits', ks_from_uniform(batch_pits, absolute=False), on_epoch=True, sync_dist=True)
         
         return loss
         
